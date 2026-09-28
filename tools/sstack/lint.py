@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run SStack lint and contract checks; never fixes or changes source files."""
 
+import argparse
 import importlib.util
 import subprocess
 import sys
@@ -11,6 +12,9 @@ STACK = ROOT / "tools/sstack"
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--code-only", action="store_true")
+    args = parser.parse_args()
     missing = [name for name in ("ruff", "yaml") if importlib.util.find_spec(name) is None]
     if missing:
         print("Missing lint dependencies. Install with the same Python interpreter:")
@@ -32,8 +36,9 @@ def main():
             str(STACK / "ruff.toml"),
             *targets,
         ],
-        [sys.executable, str(STACK / "check_contracts.py"), "--include-readme"],
     ]
+    if not args.code_only:
+        checks.append([sys.executable, str(STACK / "check_contracts.py"), "--include-readme"])
     failed = False
     for command in checks:
         try:
