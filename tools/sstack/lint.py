@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run SStack lint and contract checks; never fixes or changes source files."""
 
+import argparse
 import importlib.util
 import subprocess
 import sys
@@ -11,13 +12,20 @@ STACK = ROOT / "tools/sstack"
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--code-only", action="store_true")
+    args = parser.parse_args()
     missing = [name for name in ("ruff", "yaml") if importlib.util.find_spec(name) is None]
     if missing:
         print("Missing lint dependencies. Install with the same Python interpreter:")
         print(f"{sys.executable} -m pip install -r {STACK / 'requirements-dev.txt'}")
         return 1
+    targets = [str(STACK)]
+    installer = ROOT / "install.py"
+    if installer.is_file() and 'START = "<!-- sstack:begin -->"' in installer.read_text():
+        targets.append(str(installer))
     checks = [
-        [sys.executable, "-m", "ruff", "check", "--config", str(STACK / "ruff.toml"), str(STACK)],
+        [sys.executable, "-m", "ruff", "check", "--config", str(STACK / "ruff.toml"), *targets],
         [
             sys.executable,
             "-m",
@@ -26,10 +34,11 @@ def main():
             "--check",
             "--config",
             str(STACK / "ruff.toml"),
-            str(STACK),
+            *targets,
         ],
-        [sys.executable, str(STACK / "check_contracts.py")],
     ]
+    if not args.code_only:
+        checks.append([sys.executable, str(STACK / "check_contracts.py"), "--include-readme"])
     failed = False
     for command in checks:
         try:

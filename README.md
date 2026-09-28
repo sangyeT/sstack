@@ -225,17 +225,77 @@ small evaluation sets only where acceptance needs them, before implementation.
 See the [tool and delivery protocol](tools/sstack/README.md) for schemas, evidence,
 claims, recovery and external verification.
 
+## Faster delivery without weaker acceptance
+
+The normal gate is one command, run from your feature branch against its actual
+base (use the same Python environment throughout):
+
+```sh
+python tools/sstack/control.py verify changed --base origin/main --jobs 2
+```
+
+It selects affected checks from the project registry, runs checks declared safe
+to overlap, and collects coverage, logs and timings in one report. The built-in
+stack suite includes lint, so a separate lint invocation is unnecessary. Use
+`--jobs 1` when serial execution is needed, or `--plan` to inspect selection.
+
+- **README-only changes:** documentation contracts and links. Run any changed
+  executable examples separately; Markdown is never blindly executed.
+- **Skills, agent instructions, runtime or configuration:** full stack lint/tests.
+- **Application work:** registered affected suites and dependencies, plus the
+  ticket's acceptance criteria. Unknown paths and missing required live proof block.
+
+The shipped lightweight route covers only this repo's README.md and
+`tools/sstack/README.md`. Consumer projects must register their own documentation
+checks; a generated site or Markdown used as application input still needs its
+runtime tests. Optional `exclude_paths` separates documentation ownership from a
+broad project prefix without treating unowned paths as covered.
+
+One independent agent normally verifies acceptance **and** reviews the diff. It
+can start on a stable head while CI runs, then inspect the completed results before
+approval. Fixes return to the same engineer; the reviewer checks the affected
+changes and refreshed evidence. PM keeps tickets to one observable outcome and
+reuses the existing ticket/report/PR instead of generating extra handoff files.
+
+Custom check definitions may opt into `parallel_safe: true` only when their
+fixtures and outputs cannot conflict. They otherwise run serially. The default
+worker limit is two; `--jobs` supports one through eight.
+
+Successful offline evidence can be reused explicitly:
+
+```sh
+python tools/sstack/control.py verify changed --base origin/main \
+  --environment-key immutable-test-environment-v1
+python tools/sstack/control.py verify changed --base origin/main \
+  --environment-key immutable-test-environment-v1 \
+  --reuse "artifacts/sstack/<previous-run>/report.json"
+```
+
+Reuse requires the same head/base, source inputs, check commands, runtime identity
+and intact logs; otherwise checks rerun. Custom checks also need `reuse_safe: true`.
+The environment key is your attestation of external dependencies and fixtures,
+not a label to reuse indefinitely: change it whenever those inputs change. If
+those inputs cannot be pinned, run fresh. Live/UI proof, independent review and
+merge readiness are never satisfied by this cache. See the
+[delivery rules](tools/sstack/skills/sstack/references/delivery.md#choose-the-shortest-sufficient-path)
+for risk-based verification and exact reuse limits.
+
+CI uses the same selection, caches Python dependencies and cancels superseded
+runs for the same PR. A stable check name remains available for branch protection.
+Reports expose check and elapsed durations so actual savings can be measured;
+parallel checks do not guarantee a proportional improvement in total feature time.
+
 ## Check the stack
 
 ```sh
 python3 -m venv .venv
 .venv/bin/python -m pip install -r tools/sstack/requirements-dev.txt
-.venv/bin/python tools/sstack/lint.py
 .venv/bin/python tools/sstack/control.py verify stack
 ```
 
-The included GitHub workflow checks this repository's lint, contracts, tests and
-changed-path coverage. Product acceptance still requires the affected project's
+The included GitHub workflow selects documentation checks or stack lint/tests
+from changed-path coverage, retaining the full gate for skills and runtime edits.
+Product acceptance still requires the affected project's
 checks and any declared live/UI proof. Repository protection and required checks
 must be configured separately.
 

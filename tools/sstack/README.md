@@ -38,7 +38,6 @@ without changing saved configuration. No board is supplied with this package.
 ```sh
 python3 -m venv /tmp/sstack-dev
 /tmp/sstack-dev/bin/python -m pip install -r tools/sstack/requirements-dev.txt
-/tmp/sstack-dev/bin/python tools/sstack/lint.py
 /tmp/sstack-dev/bin/python tools/sstack/control.py verify stack
 ```
 
@@ -46,6 +45,24 @@ Lint is read-only. Deliberate fixes use `python -m ruff check --fix tools/sstack
 and `python -m ruff format tools/sstack`, then inspect and recheck. The shared
 [engineering principles](skills/sstack-mode/references/engineering.md) guide
 implementation; lint alone cannot establish good design or business correctness.
+
+For routine delivery, use `control.py verify changed --base <actual-base> --jobs 2`
+instead of a full regression. `verify stack` includes lint and tests. Exact README
+paths use the built-in `docs` suite; skills/runtime changes remain full stack.
+Custom suites accept optional `parallel_safe` and `reuse_safe` booleans, both false
+by default. Parallel execution is bounded (1–8 workers, default 2); serial checks
+act as barriers and never overlap other checks. Per-check `duration_seconds` and
+report `elapsed_seconds` expose cost without another reporting artifact.
+
+Explicit reuse uses `--reuse <report.json> --environment-key <immutable-runtime-id>`;
+the original run must supply the same environment key. Reuse verifies the full
+head/base/input/command/runtime binding and successful check log digests, and
+returns the original report reference. Mismatches rerun. Caller attestation of
+external environment state is still required; the runtime fingerprint is not a
+content hash of every excluded dependency file. Never enable reuse for live,
+time-dependent or shared-state checks. See the
+[delivery rules](skills/sstack/references/delivery.md#choose-the-shortest-sufficient-path)
+for required risk escalation and independent review.
 
 ## Project coverage and evidence
 
@@ -55,11 +72,11 @@ a project. Unknown changed paths block coverage. Shared skill edits run stack
 checks; shared runtime files can also map to their actual product consumers.
 
 ```sh
-python tools/sstack/control.py coverage --base origin/main
-python tools/sstack/control.py verify changed --base origin/main --plan
-python tools/sstack/control.py verify changed --base origin/main
+python tools/sstack/control.py verify changed --base origin/main --jobs 2
 ```
 
+The report already embeds coverage. Use standalone `coverage --base <actual-base>`
+or add `--plan` only when an inspection is useful; they are not additional gates.
 Coverage success means the changed paths were mapped, not that acceptance passed.
 `verify changed` executes registered offline commands and keeps outstanding external
 proof blocked. The controller can satisfy those obligations with the declared
@@ -128,6 +145,8 @@ second report tree. Packets by current state:
   to helper reports, and `evaluation` reference to independent premerge results.
   Coverage is recomputed; required commands, base/head, input and log digests must
   match. Required failed/duplicate checks cannot hide behind passing checks.
+  `coverage` can reference the same verification report containing embedded
+  coverage; no second coverage file is needed. The gate recomputes and compares it.
 - `reviewing`: `review` reference with `artifact`, current `plan_digest`, independent
   `reviewer`, `decision: "approved"`, and `blocking_findings: []`. Live GitHub state
   must show the expected head/base, clean merge state and successful named checks.

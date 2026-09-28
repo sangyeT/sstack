@@ -9,16 +9,23 @@ Read [features](references/features.md) for the affected journey and
 [platform](references/platform.md) before Kizen interaction. Commands below run
 from the repository root; the wrapper itself works from any working directory.
 
+Normally one agent performs both independent acceptance verification and PR
+review. Inspect valid existing evidence before deciding to rerun checks. Follow
+[delivery efficiency rules](../sstack/references/delivery.md#choose-the-shortest-sufficient-path)
+for check selection, safe parallel work and reuse; self-review is not independent.
+
 For stack checks, first install the pinned development dependencies into an
 isolated environment as described in ../../README.md, and use that interpreter.
 
 ```sh
-python3 tools/sstack/control.py doctor stack
-python3 tools/sstack/control.py verify stack
-python3 tools/sstack/control.py features
-python3 tools/sstack/control.py verify changed --base origin/main --plan
-python3 tools/sstack/control.py coverage --base origin/main
+python3 tools/sstack/control.py verify changed --base <actual-base> --jobs 2
 ```
+
+Use `doctor <suite>` only when prerequisites are uncertain, `features` to locate
+recipes, and `verify changed --base <actual-base> --plan` to inspect selection
+without running it. Standalone `coverage --base <actual-base>` is optional; the
+normal verification report already embeds coverage. Do not run all of these in
+sequence for every handoff.
 
 `verify all` runs each existing offline check independently. Failure, missing
 tools, and timeout never pass. Separate logs and report.json survive under

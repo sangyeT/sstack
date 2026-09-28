@@ -176,14 +176,15 @@ class DeliveryTests(unittest.TestCase):
                 "sources_changed_during_run": False,
                 "checks": [
                     {
-                        "name": "stack",
-                        "cwd": ".",
-                        "command": control.SUITES["stack"][0][2],
+                        "name": name,
+                        "cwd": cwd,
+                        "command": command,
                         "status": "passed",
                         "exit_code": 0,
                         "log": "artifacts/check.log",
                         "log_sha256": log["sha256"],
                     }
+                    for name, cwd, command in control.SUITES["stack"]
                 ],
             }
             return {
@@ -251,6 +252,24 @@ class DeliveryTests(unittest.TestCase):
     def reach(self, target):
         while self.store.status(self.issue)["state"] != target:
             self.advance()
+
+    def test_validation_accepts_embedded_coverage_without_duplicate_report(self):
+        packet = self.packet("validating")
+        report = delivery.evidence_file(packet["verification"][0])
+        report.update(scope="offline", coverage=delivery.evidence_file(packet["coverage"]))
+        reference = self.ref("combined.json", report)
+        packet.update(coverage=reference, verification=[reference])
+        task = {
+            "state": "validating",
+            "contract": self.contract,
+            "context": {"artifact": self.artifact},
+        }
+        delivery.gate(task, packet)
+        report["coverage"]["files"] = {}
+        reference = self.ref("combined.json", report)
+        packet.update(coverage=reference, verification=[reference])
+        with self.assertRaisesRegex(delivery.Blocked, "coverage_changed_or_incomplete"):
+            delivery.gate(task, packet)
 
     def test_validation_uses_engineer_checkout_suite_not_coordinator_registry(self):
         path = self.root / "tools/sstack/projects.json"
