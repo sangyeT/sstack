@@ -72,11 +72,11 @@ a project. Unknown changed paths block coverage. Shared skill edits run stack
 checks; shared runtime files can also map to their actual product consumers.
 
 ```sh
-python tools/sstack/control.py coverage --base origin/main
-python tools/sstack/control.py verify changed --base origin/main --plan
 python tools/sstack/control.py verify changed --base origin/main --jobs 2
 ```
 
+The report already embeds coverage. Use standalone `coverage --base <actual-base>`
+or add `--plan` only when an inspection is useful; they are not additional gates.
 Coverage success means the changed paths were mapped, not that acceptance passed.
 `verify changed` executes registered offline commands and keeps outstanding external
 proof blocked. The controller can satisfy those obligations with the declared

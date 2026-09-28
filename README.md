@@ -264,8 +264,11 @@ worker limit is two; `--jobs` supports one through eight.
 Successful offline evidence can be reused explicitly:
 
 ```sh
-python tools/sstack/control.py verify changed --base origin/main   --environment-key immutable-test-environment-v1
-python tools/sstack/control.py verify changed --base origin/main   --environment-key immutable-test-environment-v1   --reuse artifacts/sstack/<previous-run>/report.json
+python tools/sstack/control.py verify changed --base origin/main \
+  --environment-key immutable-test-environment-v1
+python tools/sstack/control.py verify changed --base origin/main \
+  --environment-key immutable-test-environment-v1 \
+  --reuse "artifacts/sstack/<previous-run>/report.json"
 ```
 
 Reuse requires the same head/base, source inputs, check commands, runtime identity
@@ -291,7 +294,8 @@ python3 -m venv .venv
 ```
 
 The included GitHub workflow selects documentation checks or stack lint/tests
-from changed-path coverage, retaining the full gate for skills and runtime edits. Product acceptance still requires the affected project's
+from changed-path coverage, retaining the full gate for skills and runtime edits.
+Product acceptance still requires the affected project's
 checks and any declared live/UI proof. Repository protection and required checks
 must be configured separately.
 
