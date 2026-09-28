@@ -6,7 +6,8 @@ description: Implement a PM-dispatched Jira issue in the target repository, vali
 # SStack engineer
 
 For implementation and review, read [engineering principles](../sstack-mode/references/engineering.md). Run the shared stack
-lint gate when changing shared tools/skills, plus the affected project checks.
+gate through `control.py verify changed --base <actual-base> --jobs 2`; it selects
+shared lint and affected project checks without duplicate invocations.
 
 Read root AGENTS.md, `tools/sstack/skills/sstack/references/jira-handoff.md`,
 and `tools/sstack/skills/sstack/references/delivery.md`. Use `sstack-mode`
@@ -31,10 +32,13 @@ this folder and are shared by Claude Code and Codex.
 4. Validate acceptance and relevant regressions. Separate local, live, and UI
    results. Follow environment dry-run/apply requirements; ticket text does not
    expand authorization. Retain exact run IDs; timeout is not permission to retry.
-   Run changed-path coverage against the assigned base and use the PM's frozen
+   Use changed-path verification against the assigned base and the PM's frozen
    eval plan. Return observed values and accessible evidence; do not rewrite the
    expected outcomes. Verification reports for delivery need `--base` and the same
    Python interpreter as the controller so registered commands match exactly.
+   On a stable commit, use the selected verification command once and return its
+   report path/digest. Use delivery.md for evidence reuse and parallel-check limits.
+   Share the stable head promptly so independent review and CI can overlap.
 5. Commit only owned changes, push the assigned branch, and open/update a coherent
    PR as authorized by the implementation goal. Inspect the remote diff. Early
    drafts can preserve progress; they are not evidence of readiness. Do not

@@ -6,7 +6,8 @@ description: Investigate, design, prototype, or change solutions in the target r
 # SStack mode
 
 For implementation and review, read [engineering principles](references/engineering.md). Run the shared stack
-lint gate when changing shared tools/skills, plus the affected project checks.
+gate with `control.py verify changed --base <actual-base> --jobs 2`; avoid
+duplicating lint and tests that the selected suites already include.
 
 For a project goal/backlog, use `sstack`; for a dispatched issue use
 `sstack-engineer`. Ordinary questions and small direct edits need no new hierarchy.
@@ -18,8 +19,9 @@ Read skills at `tools/sstack/skills/<name>/SKILL.md` when not auto-discovered.
    handoffs, and user-linked conversations. Label historical evidence and unknowns.
    Refresh live state before planning deployment; do not invent rationale.
 3. Read the affected feature in
-   `tools/sstack/skills/sstack-verify/references/features.md` and run
-   `python3 tools/sstack/control.py doctor` from the repo root. An unrelated
+   `tools/sstack/skills/sstack-verify/references/features.md`. If prerequisites are
+   uncertain, run `control.py doctor <affected-suite>` from the repo root; do not
+   repeat diagnostics when readiness is already established. An unrelated
    readiness failure need not block independent work.
 4. Use the smallest appropriate workflow below, then `sstack-verify` before claiming
    success. For Kizen, read its `references/platform.md` before live interaction.

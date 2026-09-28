@@ -7,7 +7,9 @@ description: Break requested project goals into Jira work, design with Kizen fir
 
 Read [Jira handoff](references/jira-handoff.md) and
 [delivery gates](references/delivery.md). Follow root AGENTS.md for shared
-preferences and host switching. This works with Claude Code or Codex using the
+preferences and host switching. Use delivery.md's shortest sufficient path: one
+engineer and one independent verifier/reviewer by default, with selected checks
+running concurrently on a stable artifact. This works with Claude Code or Codex using the
 host's available tools; a skill name alone does not register a subagent.
 
 Resolve the PM board in this order: the user's explicit board for this goal,
@@ -41,7 +43,8 @@ establish them. A Jira project is separate from the repo folder and Kizen busine
    for a user outcome, bug/task for bounded work, research issue for an unresolved
    question. Feature/subtask equivalents require verified support. A simple
    change does not need every hierarchy level. Split cross-project changes into
-   owned children with explicit dependencies.
+   owned children with explicit dependencies. Keep each leaf to one independently
+   verifiable outcome; avoid artificial hierarchy or splitting trivial work.
 5. Write concrete issue descriptions using the handoff contract. Each executable
    leaf needs project/scope, acceptance, dependencies, environment, verification,
    Git delivery context, and any remaining deployment approval boundary. PM owns
@@ -108,8 +111,9 @@ those actions are already within the authorized goal.
    approval. Prepare the spec/diff and required dry-run first; reuse existing
    approval for the same scope. Batch compatible concrete decisions and keep
    useful independent work moving.
-4. On hand-back, validate the artifact, open/inspect its PR, assign independent
-   agent review, route findings back, and check current CI. Automatically advance
+4. On a stable pushed artifact, overlap one independent agent's verification/review
+   with CI and safe local checks. Inspect final evidence, route findings to the same
+   engineer, and refresh only affected proof and review after fixes. Automatically advance
    to merge when the delivery gate passes. Engineer completion is not Done.
 5. Confirm remote merge and carry out any explicitly planned, authorized rollout
    and proof. Keep deployment-inclusive issues open until their outcome is proven.

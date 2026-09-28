@@ -20,7 +20,12 @@ Answer in chat by default. Create artifacts only when requested or necessary for
 implementation, verification or handoff; update existing records instead of
 duplicating them. Keep secrets and private customer data out of shared evidence.
 
-Run python tools/sstack/lint.py and python tools/sstack/control.py verify stack
-with the pinned development dependencies before delivering tooling changes.
+Run python tools/sstack/control.py verify changed --base <actual-base> --jobs 2
+with pinned development dependencies. This selects docs checks or shared lint/tests
+and affected project suites; do not duplicate the selected commands. Runtime and
+skill changes require the full stack gate. Use one independent verifier/reviewer
+by default and overlap it with safe checks on a stable commit. See the delivery
+contract for risk escalation and exact-input evidence reuse. Use verify stack for
+an explicit full regression or when no comparison base exists.
 Report actual evidence and operating limits. The local delivery store coordinates
 one clone and its worktrees on one host, not independent clones or computers.

@@ -44,7 +44,9 @@ best practices.
 
 From the repo root, install `tools/sstack/requirements-dev.txt` into an
 isolated Python environment, then run `python tools/sstack/lint.py` with that
-interpreter. CI runs the same command and the stack tests. Ruff catches undefined
+interpreter for a deliberate lint-only pass. Normal delivery uses `control.py
+verify changed --base <actual-base> --jobs 2`, which includes lint when required.
+CI uses the same selection instead of repeating checks. Ruff catches undefined
 and unused names, invalid syntax, common bug patterns (including mutable defaults),
 broad exception catches, import ordering and obsolete noqa suppressions. Its
 formatter removes style debates. The contract checker validates skill metadata,

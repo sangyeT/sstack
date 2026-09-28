@@ -16,8 +16,12 @@ def main():
         print("Missing lint dependencies. Install with the same Python interpreter:")
         print(f"{sys.executable} -m pip install -r {STACK / 'requirements-dev.txt'}")
         return 1
+    targets = [str(STACK)]
+    installer = ROOT / "install.py"
+    if installer.is_file() and 'START = "<!-- sstack:begin -->"' in installer.read_text():
+        targets.append(str(installer))
     checks = [
-        [sys.executable, "-m", "ruff", "check", "--config", str(STACK / "ruff.toml"), str(STACK)],
+        [sys.executable, "-m", "ruff", "check", "--config", str(STACK / "ruff.toml"), *targets],
         [
             sys.executable,
             "-m",
@@ -26,9 +30,9 @@ def main():
             "--check",
             "--config",
             str(STACK / "ruff.toml"),
-            str(STACK),
+            *targets,
         ],
-        [sys.executable, str(STACK / "check_contracts.py")],
+        [sys.executable, str(STACK / "check_contracts.py"), "--include-readme"],
     ]
     failed = False
     for command in checks:

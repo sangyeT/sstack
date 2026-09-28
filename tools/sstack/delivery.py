@@ -181,6 +181,9 @@ def gate(task, packet, *, reader=github):
         check_sources(contract, artifact)
         require(packet.get("artifact") == artifact, "artifact_changed")
         coverage = evidence_file(packet.get("coverage"))
+        if coverage.get("scope") == "offline" and "coverage" in coverage:
+            coverage = coverage["coverage"]
+        require(isinstance(coverage, dict), "coverage_missing")
         require(coverage.get("status") == "passed", "coverage_not_passed")
         require(
             coverage.get("head") == artifact["head"] and coverage.get("base") == artifact["base"],

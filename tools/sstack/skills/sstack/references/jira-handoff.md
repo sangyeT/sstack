@@ -91,6 +91,8 @@ Environment/business/host and authorized actions: <bindings and exact scope>.
 Controller: <coordinator checkout>, issue <key>, owner <claim owner>, epoch <epoch>,
 operation <ID>. PM retains coordination; stop on ownership loss or scope conflict.
 Acceptance and evaluation plan: <existing record/reference and frozen digest>.
+Delivery path and risk: <docs/bug/feature/live; reason and additional gates>.
+Existing proof: <report references and unchanged bindings, or missing evidence>.
 Verification: <exact commands/interpreter, premerge/postmerge cases, live/UI routes>.
 
 Implement, run applicable checks, commit/push only owned changes, and open/update
@@ -104,7 +106,8 @@ Record the returned native worker ID against the ticket's declared engineer
 identity in the existing checkpoint. PM keeps leases current, watches worker
 outcomes, and sends review fixes to the same worker. Before replacing a worker,
 stop it and reconcile its pending operation; do not launch a competing replacement.
-After hand-back, use a different worker for independent verification/review, with
+Once the engineer supplies a stable head, use one different worker for both
+independent verification and review, overlapping with CI/local checks, with
 the requirements, frozen plan and actual diff/results. PM advances controller
 gates, merges when eligible, verifies rollout, updates Jira, and dispatches the
 next ready ticket in the same authorized goal. If native delegation is unavailable,

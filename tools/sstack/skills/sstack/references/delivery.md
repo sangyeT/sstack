@@ -1,6 +1,7 @@
 # Automated delivery gates
 
-PM, validator, and reviewer are agent roles. Routine gates advance automatically
+PM, validator, and reviewer are agent roles; one independent agent normally fills
+both validation and review responsibilities. Routine gates advance automatically
 within the authorized goal. Do not ask a human to approve each test, commit, push,
 PR, review, merge, or next issue. Respect explicit plan-only/no-merge limits.
 
@@ -9,6 +10,69 @@ required human repository approval, or an environment-specific Kizen apply
 approval. Prepare the concrete change and dry-run before requesting that approval.
 Reuse approval for the same scope; changed material scope needs fresh approval.
 Never bypass branch protection or impersonate a required reviewer.
+
+## Choose the shortest sufficient path
+
+Default to one engineer and one independent agent that both verifies acceptance
+and reviews the diff. These are two responsibilities, not a requirement for two
+separate reviewers. Add specialists only for a concrete risk or missing expertise.
+Use the existing ticket, report and PR for handoffs; do not create duplicate plans
+or evidence documents. Load relevant skill references once per version and reuse
+known scope/access until a change or failure makes a refresh necessary.
+
+| Change | Required work |
+| --- | --- |
+| Documentation only | Check affected links/contracts and run changed executable examples. No product deployment proof without a deployment change. |
+| Bounded bug fix | Reproduce the bug, run selected regressions and verify acceptance; independent review. |
+| Feature or shared runtime change | Registered affected suites, relevant integration/UI acceptance and independent review. |
+| Permissions, schema/data migration or Kizen rollout | Applicable local checks plus exact live execution/readback, authorized rollout and recovery proof. |
+
+Path selection is a minimum, not a risk assessment. The shipped registry routes
+only root README.md and tools/sstack/README.md to the documentation suite. Skills,
+agent instructions, configuration, workflow and runtime edits keep the full stack
+gate. If a README changes a runnable procedure, execute the changed example too;
+the checker deliberately does not execute Markdown. Mixed changes take the union
+of checks; unknown paths block. Consumer projects register their real dependencies
+and checks instead of guessing coverage. Compiled documentation or Markdown used
+at runtime needs its application's suite, not the lightweight documentation route.
+
+Run `python tools/sstack/control.py verify changed --base <actual-base> --jobs 2`
+as the normal local gate. This selects required checks, includes stack lint when
+needed, runs declared independent checks concurrently and saves one report with
+coverage, per-check durations and total elapsed time. Do not run the same lint,
+coverage or tests separately merely because another role picked up the work.
+Use `--plan` only when you need to inspect selection before execution. Missing
+coverage or required external proof remains blocked.
+
+On a stable commit, let the independent agent review while CI and safe local
+checks run. It must inspect completed results before approving. Never start
+parallel checks against shared mutable fixtures or live Kizen records; custom
+checks run serially unless reviewed `parallel_safe: true` declarations establish
+isolation. `--jobs 1` forces serial execution. Reuse the same engineer for fixes
+and the same reviewer for focused re-review; a new head still needs fresh review.
+
+Successful offline evidence may be reused with `--reuse <report.json>` only when
+head, base, source fingerprint, check definitions, log digests and runtime identity
+match. Supply `--environment-key <immutable-environment-id>` on both original and
+reuse runs. This caller-provided key must identify external dependency/environment
+state that source fingerprints cannot prove; change it after dependency or fixture
+changes, and omit reuse when that state is uncertain. Custom checks also require
+reviewed `reuse_safe: true`; never mark live, time-dependent or shared-state checks
+safe. Runtime identity includes hashed environment and executable/dependency
+metadata, not a complete attestation of excluded runtime files. Cache misses rerun
+the checks. Do not reuse a local result across commits, or reuse live/UI results,
+independent review, acceptance-plan scoring or GitHub merge readiness through this
+cache. The independent agent can inspect valid existing evidence without rerunning
+it; missing, stale or suspect evidence still requires fresh verification.
+
+Keep tickets to one observable outcome and a small owned implementation slice.
+Prepare ready briefs while an engineer works, but do not split a trivial change
+into artificial stages or tickets. Batch read-only status queries, use the host's
+completion notifications or a bounded CI wait, and avoid repeated unchanged
+polling. Gate failure routes directly to the accountable engineer with the
+counterexample; repeated identical failure needs diagnosis, not another full run.
+The trusted host still performs Jira, review and merge actions; this faster check
+runner does not install a general-purpose autonomous host adapter or scheduler.
 
 ## 1. Dispatch
 
@@ -41,7 +105,7 @@ for early visibility but do not satisfy readiness. Record the tested commit SHA.
 
 PM inspects the actual artifact, diff, and acceptance evidence. Rerun checks when
 evidence is missing, stale, or a concern justifies it; do not repeat everything
-ritually. Commission a reviewer independent of the implementing agent, supplying
+ritually. Commission one verifier/reviewer independent of the implementing agent, supplying
 requirements and raw base/head diff rather than a request to rubber-stamp it.
 If independent delegation is unavailable, say so; self-review is not independent.
 
@@ -117,6 +181,6 @@ workflow (lint and tests) on the current PR head before merge. Project-specific
 acceptance remains separate.
 
 These procedures run during active agent work or an explicitly launched worker.
-The quality workflow runs shared lint/tests and project registration checks on
-every PR; it does not run every application's acceptance checks. The workflow does
+The quality workflow selects documentation checks or shared lint/tests and project
+registration checks on every PR; it does not run every application's acceptance checks. The workflow does
 not change GitHub protection or create a background Jira watcher.
