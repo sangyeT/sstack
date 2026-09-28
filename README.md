@@ -11,6 +11,127 @@ independent review, merges eligible PRs, verifies required rollout, updates Jira
 and picks up the next ticket within the goal. Failed gates return work for fixes;
 an open PR or a merged configuration file alone is not delivery proof.
 
+## Why the verification loop matters
+
+Autonomous delivery needs a reliable way to distinguish a completed outcome from
+an agent's claim that it finished. Code can compile while calculating the wrong
+answer. A Kizen workflow can run while updating the wrong record. A PR can merge
+while the deployed UI still shows old behavior. Each needs a different check.
+
+SStack defines the expected outcome before implementation, binds evidence to the
+actual version tested, and sends failures back for correction. Independent review
+helps catch assumptions shared by the implementation and its tests. This gives
+routine work a path to completion without asking a person to approve every step,
+while keeping missing proof visible.
+
+```mermaid
+flowchart TD
+    A[PM defines acceptance and expected results] --> B[Engineer implements]
+    B --> C[Run affected tests and behavior checks]
+    C --> D{Required checks pass?}
+    D -- No --> E[Engineer fixes the specific failure]
+    E --> C
+    D -- Yes --> F[Independent verification and PR review]
+    F -- Findings or stale evidence --> E
+    F -- Approved --> G[Fresh CI and expected-head merge gate]
+    G -- Failed checks or changed code --> E
+    G -- Pass --> H[Merge and confirm merge SHA]
+    H --> I{Required live rollout verified?}
+    I -- Failed or missing proof --> J[Keep ticket open; diagnose and repair]
+    J -- Code change needs a new PR --> B
+    J -- Authorized deployment retry or fresh proof --> I
+    I -- Passed or explicitly not required --> K[Jira Done; next eligible ticket]
+```
+
+Missing access or a consequential product decision pauses the affected work;
+it is not a reason to retry forever. After a code change, refresh affected tests
+and independent review for the new commit. Never change expected results just to
+make a failed implementation pass. A post-merge code repair uses a new PR and its
+own delivery cycle; it does not rewind the merged controller record.
+
+### Demonstration: portfolio allocation
+
+This is an illustrative feature, not a portfolio application included in SStack.
+The goal is to show allocation **by holding value**. PM freezes this example
+before dispatch: stocks worth $6,000 and bonds worth $4,000 must display 60% stocks
+and 40% bonds. PM also specifies which checks run before merge and which require
+the deployed environment.
+
+| Step | Observation | Gate decision |
+| --- | --- | --- |
+| Engineer builds | The implementation counts holdings: one stock and one bond, giving 50% / 50%. Build and lint pass. | Build success does not meet acceptance. |
+| Verifier checks | Actual 50% / 50% differs from expected 60% / 40%. | Fail; PM returns the counterexample to the engineer. |
+| Engineer fixes | Calculate each category's value divided by the $10,000 total. | Rerun the case and relevant regressions; keep the same expectation. |
+| Independent agent verifies | Fresh results show 60% / 40%; the UI and saved values agree in the declared test environment. | Record evidence against the new commit and review its diff. |
+| PM checks merge gates | Required acceptance, review and CI pass for the current PR head. | Merge and read back the actual merge SHA. |
+| Verifier checks rollout | The intended deployed environment shows the same outcome for the synthetic holdings. | Mark Done only after required live proof; otherwise keep the ticket open. |
+
+For a Kizen implementation, proof should correlate the synthetic holdings, exact
+workflow execution, persisted result and rendered allocation. A `.kzn` file shows
+configuration; a screenshot shows one rendered state. Neither alone establishes
+that the correct execution saved the correct business result.
+
+<details>
+<summary>Run the failure → pass scoring demonstration locally</summary>
+
+From the repository root, run the following with Python 3.9+. It uses SStack's
+actual evaluation scorer with synthetic observations and version identifiers.
+It writes no files and performs no Jira, GitHub or Kizen operations.
+
+```sh
+PYTHONPATH=tools/sstack python3 - <<'PY'
+from evaluations import evaluate, plan_digest
+
+plan = {
+    "schema_version": 1, "issue": "DEMO-1",
+    "author": "demo-pm", "implementer": "demo-engineer",
+    "acceptance_ids": ["allocation-by-value"],
+    "cases": [{
+        "id": "mixed-holdings", "acceptance_id": "allocation-by-value",
+        "input": {"stocks": 6000, "bonds": 4000},
+        "expected": {"stocks_pct": 60, "bonds_pct": 40},
+        "phase": "premerge", "surface": "local",
+        "route": "Synthetic allocation example; no live application",
+    }],
+}
+for label, values, head in [
+    ("Before fix", {"stocks_pct": 50, "bonds_pct": 50}, "demo-head-1"),
+    ("After fix", {"stocks_pct": 60, "bonds_pct": 40}, "demo-head-2"),
+]:
+    bindings = {"head": head, "base": "demo-base", "fingerprint": head + "-inputs"}
+    result = {
+        "schema_version": 1, "issue": plan["issue"],
+        "plan_digest": plan_digest(plan), **bindings,
+        "phase": "premerge", "verifier": "demo-verifier",
+        "cases": [{"id": "mixed-holdings", "observed": values,
+                   "evidence": ["synthetic:inline-example"]}],
+    }
+    report = evaluate(plan, result, **bindings)
+    print(label + ": " + report["status"], report["reasons"])
+PY
+```
+
+Expected output:
+
+```text
+Before fix: failed ['outcome_mismatch:mixed-holdings']
+After fix: passed []
+```
+
+This demonstrates scoring against unchanged expectations, not an executed repair
+or independent live verification. Real delivery requires a verifier to inspect
+actual evidence and the controller to check real commit, input and CI bindings.
+The scorer itself cannot authenticate who supplied an observation or whether it
+came from the claimed system.
+
+</details>
+
+The loop runs during active agent work or through an explicitly configured host
+worker. GitHub CI checks SStack's tooling; it does not automatically exercise every
+consumer application's UI or Kizen environment. See the
+[delivery gates](tools/sstack/skills/sstack/references/delivery.md) for the full
+handoff, recovery and merge rules.
+
 ## Install into a repository
 
 Requires Git, Python 3.9+ and a filesystem that supports symlinks. Clone SStack:
