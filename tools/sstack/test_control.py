@@ -74,13 +74,13 @@ class VerificationTests(unittest.TestCase):
         with patch.object(control, "run_check") as run:
             report = control.verify("all", root=self.root)
         run.assert_not_called()
-        self.assertEqual(len(report["checks"]), 1)
+        self.assertEqual(len(report["checks"]), 3)
         self.assertEqual({item["status"] for item in report["checks"]}, {"blocked"})
         self.assertEqual(report["status"], "blocked")
         diagnostics = control.doctor(self.root)
         self.assertEqual(diagnostics["status"], "blocked")
         self.assertEqual(diagnostics["verification"], "not_run")
-        self.assertEqual(set(diagnostics["readiness"]), {"stack"})
+        self.assertEqual(set(diagnostics["readiness"]), {"stack", "docs"})
 
     def test_stack_missing_dev_dependencies_blocks_before_execution(self):
         with patch.object(control.importlib.util, "find_spec", return_value=None):
@@ -93,6 +93,8 @@ class VerificationTests(unittest.TestCase):
         tests = self.root / "tools/sstack"
         tests.mkdir(parents=True)
         (tests / "test_example.py").write_text("import unittest")
+        (tests / "lint.py").write_text("pass")
+        (tests / "check_contracts.py").write_text("pass")
         self.assertEqual(control.doctor(self.root, "stack")["status"], "passed")
 
     def test_empty_test_directory_is_blocked(self):

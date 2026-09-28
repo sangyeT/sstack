@@ -4,6 +4,7 @@
 import argparse
 import datetime
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -12,12 +13,15 @@ import signal
 import stat
 import subprocess
 import sys
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import registry
 
 ROOT = Path(__file__).resolve().parents[2]
+DOCS_CHECK = ("docs", ".", [sys.executable, "tools/sstack/check_contracts.py", "--include-readme"])
 BUILTIN_SUITES = {
     "stack": [
         (
@@ -34,8 +38,11 @@ BUILTIN_SUITES = {
                 "test_*.py",
                 "-v",
             ],
-        )
+        ),
+        ("stack-lint", ".", [sys.executable, "tools/sstack/lint.py", "--code-only"]),
+        DOCS_CHECK,
     ],
+    "docs": [DOCS_CHECK],
 }
 SUITES = registry.load_suites(ROOT, BUILTIN_SUITES)
 
@@ -183,18 +190,27 @@ def coverage(root, base):
     }
 
 
+def executable_path(executable, directory):
+    if os.path.dirname(executable):
+        return shutil.which(str(directory / executable))
+    search_path = os.pathsep.join(str(directory / part) for part in os.get_exec_path())
+    return shutil.which(executable, path=search_path)
+
+
 def check_readiness(name, cwd, command, *, root):
     """Inspect known suite contracts without importing or executing project code."""
     reasons = []
     directory = root / cwd
     if not directory.is_dir():
         reasons.append("working_directory_missing")
-    if not shutil.which(command[0]):
+    if not executable_path(command[0], directory):
         reasons.append("executable_missing")
-    if name == "stack":
+    if name in {"stack", "stack-lint", "docs"}:
         for module in ("ruff", "yaml"):
             if importlib.util.find_spec(module) is None:
                 reasons.append(f"dev_dependency_missing:{module}")
+    if name in {"stack-lint", "docs"} and not (directory / command[1]).is_file():
+        reasons.append("check_script_missing")
     if command[1:4] == ["-m", "unittest", "discover"]:
         arguments = command[4:]
         tests = directory / (arguments[arguments.index("-s") + 1] if "-s" in arguments else ".")
@@ -270,6 +286,7 @@ def doctor(root, suite="all"):
 
 
 def run_check(name, cwd, command, *, root, timeout):
+    started = time.monotonic()
     result = {"name": name, "cwd": cwd, "command": command}
     try:
         process = subprocess.Popen(
@@ -287,6 +304,7 @@ def run_check(name, cwd, command, *, root, timeout):
             **result,
             "status": "blocked",
             "exit_code": None,
+            "duration_seconds": time.monotonic() - started,
         }, f"{type(error).__name__}: {error}\n"
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -313,11 +331,128 @@ def run_check(name, cwd, command, *, root, timeout):
         **result,
         "status": status,
         "exit_code": process.returncode,
+        "duration_seconds": time.monotonic() - started,
     }, stdout + "\n--- stderr ---\n" + stderr
 
 
-def verify(suite, *, timeout=60, plan=False, root=None, base=None):
-    root = ROOT if root is None else root
+def approved_checks(root, flag):
+    names = {"stack", "stack-lint", "docs"}
+    path = root / registry.REGISTRY_PATH
+    if path.exists():
+        document = json.loads(path.read_text())
+        names.update(
+            check["name"]
+            for checks in document.get("suites", {}).values()
+            for check in checks
+            if check.get(flag) is True
+        )
+    return names
+
+
+def runtime_identity(checks, root):
+    executables = sorted(
+        {(".", sys.executable), *((cwd, command[0]) for _, cwd, command in checks)}
+    )
+    identities = []
+    for cwd, executable in executables:
+        located = executable_path(executable, root / cwd)
+        path = Path(located).resolve() if located else None
+        identities.append(
+            {
+                "command": executable,
+                "cwd": cwd,
+                "path": str(path) if path else None,
+                "sha256": file_digest(path) if path and path.is_file() else None,
+            }
+        )
+    return {
+        "environment_sha256": hashlib.sha256(
+            json.dumps(dict(os.environ), sort_keys=True).encode()
+        ).hexdigest(),
+        "python_version": sys.version,
+        "executables": identities,
+        "distributions": sorted(
+            [distribution.metadata.get("Name", ""), distribution.version]
+            for distribution in importlib.metadata.distributions()
+        ),
+    }
+
+
+def check_contracts(checks):
+    return [{"name": name, "cwd": cwd, "command": command} for name, cwd, command in checks]
+
+
+def reused_report(path, *, root, expected, checks):
+    try:
+        report = json.loads(path.read_text())
+        if not isinstance(report, dict):
+            return None, "invalid_report"
+        if any(report.get(key) != value for key, value in expected.items()):
+            return None, "report_binding_mismatch"
+        recorded = report.get("checks")
+        if (
+            not isinstance(recorded, list)
+            or not recorded
+            or any(
+                not isinstance(check, dict)
+                or check.get("status") != "passed"
+                or check.get("exit_code") != 0
+                for check in recorded
+            )
+        ):
+            return None, "checks_not_passed"
+        if [
+            {key: check.get(key) for key in ("name", "cwd", "command")} for check in recorded
+        ] != check_contracts(checks):
+            return None, "check_contract_mismatch"
+        for check in recorded:
+            log = root / check["log"]
+            log.resolve().relative_to(root.resolve())
+            if file_digest(log) != check["log_sha256"]:
+                return None, "log_digest_mismatch"
+        report_path = root / report["report"]
+        if report_path.resolve() != path.resolve():
+            return None, "report_path_mismatch"
+        return report, "exact_offline_match"
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None, "invalid_or_missing_report_or_log"
+
+
+def execute_checks(checks, *, root, timeout, jobs):
+    def execute(check):
+        started = time.monotonic()
+        prerequisite = check_readiness(*check, root=root)
+        if prerequisite["status"] == "blocked":
+            return (
+                {**prerequisite, "exit_code": None, "duration_seconds": time.monotonic() - started},
+                "Blocked prerequisites: " + ", ".join(prerequisite["reasons"]) + "\n",
+            )
+        return run_check(*check, root=root, timeout=timeout)
+
+    safe = approved_checks(root, "parallel_safe")
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        pending = []
+        for check in checks:
+            if check[0] in safe:
+                pending.append(executor.submit(execute, check))
+            else:
+                for future in pending:
+                    yield future.result()
+                pending = []
+                yield execute(check)
+        for future in pending:
+            yield future.result()
+
+
+def verify(
+    suite, *, timeout=60, plan=False, root=None, base=None, jobs=2, reuse=None, environment_key=None
+):
+    started = time.monotonic()
+    if not isinstance(jobs, int) or isinstance(jobs, bool) or not 1 <= jobs <= 8:
+        raise ValueError("jobs must be between 1 and 8")
+    if reuse is not None and (not isinstance(environment_key, str) or not environment_key.strip()):
+        raise ValueError("--reuse requires a nonempty --environment-key")
+    root = ROOT if root is None else Path(root)
     selection = None
     suites = suites_for(root)
     if suite == "changed":
@@ -327,16 +462,77 @@ def verify(suite, *, timeout=60, plan=False, root=None, base=None):
         selected = selection["suites"]
     else:
         selected = suites if suite == "all" else [suite]
-    checks = [check for key in selected for check in suites[key]]
+    unique = {}
+    for key in selected:
+        for check in suites[key]:
+            if check[0] in unique and unique[check[0]] != check:
+                raise ValueError("conflicting check contracts: " + check[0])
+            unique[check[0]] = check
+    checks = list(unique.values())
     if plan:
         return {
             "status": "planned",
             "suite": suite,
             "coverage": selection,
-            "checks": [
-                {"name": name, "cwd": cwd, "command": command} for name, cwd, command in checks
-            ],
+            "checks": check_contracts(checks),
+            "jobs": jobs,
         }
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
+    )
+    before = fingerprint(root)
+    identity = runtime_identity(checks, root)
+    bindings = {
+        "suite": suite,
+        "scope": "offline",
+        "coverage": selection,
+        "base_revision": registry.revision(root, base) if base else None,
+        "fingerprint_policy": FINGERPRINT_POLICY,
+        "live_kizen": "not_tested",
+        "ui": "not_tested",
+        "git_revision": revision.stdout.strip() if revision.returncode == 0 else None,
+        "source_fingerprint_before": before,
+        "runtime_identity": identity,
+        "environment_key_sha256": hashlib.sha256(environment_key.encode()).hexdigest()
+        if environment_key
+        else None,
+    }
+    reuse_result = {"status": "not_requested"}
+    if reuse is not None:
+        reuse_path = Path(reuse)
+        if not reuse_path.is_absolute():
+            reuse_path = root / reuse_path
+        reusable = approved_checks(root, "reuse_safe")
+        if not bindings["git_revision"] or any(check[0] not in reusable for check in checks):
+            cached, reason = None, "checks_not_reuse_safe_or_head_missing"
+        else:
+            cached, reason = reused_report(
+                reuse_path,
+                root=root,
+                checks=checks,
+                expected={
+                    **bindings,
+                    "status": "passed",
+                    "source_fingerprint_after": before,
+                    "sources_changed_during_run": False,
+                },
+            )
+        if cached and any(
+            check_readiness(*check, root=root)["status"] != "ready" for check in checks
+        ):
+            cached, reason = None, "prerequisites_not_ready"
+        if cached and fingerprint(root) != before:
+            cached, reason = None, "sources_changed_during_reuse"
+        reuse_result = {
+            "status": "hit" if cached else "miss",
+            "reason": reason,
+            "report": str(reuse),
+        }
+        if cached:
+            return {
+                **cached,
+                "reuse": {**reuse_result, "elapsed_seconds": time.monotonic() - started},
+            }
     run_id = (
         datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         + "-"
@@ -344,32 +540,16 @@ def verify(suite, *, timeout=60, plan=False, root=None, base=None):
     )
     output = root / "artifacts" / "sstack" / run_id
     output.mkdir(parents=True)
-    revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
-    )
-    before = fingerprint(root)
     report = {
+        **bindings,
         "run_id": run_id,
-        "suite": suite,
-        "scope": "offline",
-        "coverage": selection,
-        "base_revision": registry.revision(root, base) if base else None,
-        "fingerprint_policy": FINGERPRINT_POLICY,
         "excluded_inputs": excluded_inputs(root),
-        "live_kizen": "not_tested",
-        "ui": "not_tested",
-        "git_revision": revision.stdout.strip() if revision.returncode == 0 else None,
-        "source_fingerprint_before": before,
+        "jobs": jobs,
+        "reuse": reuse_result,
         "checks": [],
     }
-    for name, cwd, command in checks:
-        prerequisite = check_readiness(name, cwd, command, root=root)
-        if prerequisite["status"] == "blocked":
-            result = {**prerequisite, "exit_code": None}
-            log = "Blocked prerequisites: " + ", ".join(prerequisite["reasons"]) + "\n"
-        else:
-            result, log = run_check(name, cwd, command, root=root, timeout=timeout)
-        log_path = output / (name + ".log")
+    for result, log in execute_checks(checks, root=root, timeout=timeout, jobs=jobs):
+        log_path = output / (result["name"] + ".log")
         log_path.write_text(log)
         result["log"] = str(log_path.relative_to(root))
         result["log_sha256"] = file_digest(log_path)
@@ -399,6 +579,7 @@ def verify(suite, *, timeout=60, plan=False, root=None, base=None):
     )
     if report["sources_changed_during_run"] and report["status"] == "passed":
         report["status"] = "blocked"
+    report["elapsed_seconds"] = time.monotonic() - started
     report["report"] = str((output / "report.json").relative_to(root))
     (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
@@ -408,6 +589,13 @@ def positive(value):
     result = int(value)
     if result <= 0:
         raise argparse.ArgumentTypeError("must be positive")
+    return result
+
+
+def bounded_jobs(value):
+    result = positive(value)
+    if result > 8:
+        raise argparse.ArgumentTypeError("must be at most 8")
     return result
 
 
@@ -440,6 +628,9 @@ def main():
     coverage_parser.add_argument("--base", required=True)
     runner.add_argument("--timeout", type=positive, default=60)
     runner.add_argument("--plan", action="store_true")
+    runner.add_argument("--jobs", type=bounded_jobs, default=2)
+    runner.add_argument("--reuse", metavar="REPORT")
+    runner.add_argument("--environment-key", metavar="TOKEN")
     args = parser.parse_args()
     if args.command == "features":
         print((ROOT / "tools/sstack/skills/sstack-verify/references/features.md").read_text())
@@ -451,7 +642,15 @@ def main():
             else (
                 doctor(ROOT, args.suite)
                 if args.command == "doctor"
-                else verify(args.suite, timeout=args.timeout, plan=args.plan, base=args.base)
+                else verify(
+                    args.suite,
+                    timeout=args.timeout,
+                    plan=args.plan,
+                    base=args.base,
+                    jobs=args.jobs,
+                    reuse=args.reuse,
+                    environment_key=args.environment_key,
+                )
             )
         )
     except (OSError, ValueError, subprocess.SubprocessError) as error:
