@@ -79,7 +79,7 @@ actual evaluation scorer with synthetic observations and version identifiers.
 It writes no files and performs no Jira, GitHub or Kizen operations.
 
 ```sh
-PYTHONPATH=tools/sstack python3 - <<'PY'
+PYTHONPATH=tools/sstack python3 -B - <<'PY'
 from evaluations import evaluate, plan_digest
 
 plan = {
