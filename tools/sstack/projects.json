@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "stack",
+      "paths": [
+        "tools/sstack/",
+        ".agents/skills/",
+        ".claude/skills/",
+        ".github/workflows/sstack-quality.yml"
+      ],
+      "suites": [
+        "stack"
+      ],
+      "external": [],
+      "affects": []
+    },
+    {
+      "id": "repository",
+      "paths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "README.md",
+        ".gitignore",
+        "install.py",
+        ".sstack.json"
+      ],
+      "suites": [
+        "stack"
+      ],
+      "external": [],
+      "affects": [
+        "stack"
+      ]
+    }
+  ],
+  "suites": {}
+}
