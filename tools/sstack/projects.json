@@ -13,14 +13,16 @@
         "stack"
       ],
       "external": [],
-      "affects": []
+      "affects": [],
+      "exclude_paths": [
+        "tools/sstack/README.md"
+      ]
     },
     {
       "id": "repository",
       "paths": [
         "AGENTS.md",
         "CLAUDE.md",
-        "README.md",
         ".gitignore",
         "install.py",
         ".sstack.json"
@@ -32,6 +34,18 @@
       "affects": [
         "stack"
       ]
+    },
+    {
+      "id": "documentation",
+      "paths": [
+        "README.md",
+        "tools/sstack/README.md"
+      ],
+      "suites": [
+        "docs"
+      ],
+      "external": [],
+      "affects": []
     }
   ],
   "suites": {}

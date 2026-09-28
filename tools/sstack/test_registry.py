@@ -145,6 +145,75 @@ class CoverageTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     control.coverage(self.root, self.base)
 
+    def test_custom_safety_flags_require_booleans_and_preserve_check_shape(self):
+        path = self.root / registry.REGISTRY_PATH
+        document = json.loads(path.read_text())
+        check = {"name": "custom-check", "cwd": ".", "command": ["$PYTHON", "checks.py"]}
+        for flag in ("parallel_safe", "reuse_safe"):
+            for value in (False, True, None, "true", 1, [], {}):
+                with self.subTest(flag=flag, value=value):
+                    document["suites"] = {"custom": [{**check, flag: value}]}
+                    path.write_text(json.dumps(document))
+                    if isinstance(value, bool):
+                        loaded = registry.load_suites(self.root, {})["custom"][0]
+                        self.assertEqual(
+                            loaded, ("custom-check", ".", [control.sys.executable, "checks.py"])
+                        )
+                    else:
+                        with self.assertRaisesRegex(ValueError, flag):
+                            registry.load_suites(self.root, {})
+
+    def test_excluded_unowned_changes_still_block(self):
+        path = self.root / registry.REGISTRY_PATH
+        document = json.loads(path.read_text())
+        document["projects"][0]["exclude_paths"] = ["app/private/"]
+        path.write_text(json.dumps(document))
+        self.git("add", ".")
+        self.git("commit", "-qm", "exclude private paths")
+        self.write("app/private/new.py", "value = 1\n")
+        result = control.coverage(self.root, "HEAD")
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["unknown_paths"], ["app/private/new.py"])
+
+    def test_invalid_exclude_paths_fail_closed(self):
+        path = self.root / registry.REGISTRY_PATH
+        document = json.loads(path.read_text())
+        for excludes in (None, "app/", [""], [1], ["/app/"], ["../app/"], ["."]):
+            with self.subTest(excludes=excludes):
+                document["projects"][0]["exclude_paths"] = excludes
+                path.write_text(json.dumps(document))
+                with self.assertRaises(ValueError):
+                    control.coverage(self.root, self.base)
+
+    def test_default_registry_keeps_lightweight_selection_exact(self):
+        document = json.loads((Path(__file__).parent / "projects.json").read_text())
+        self.write(registry.REGISTRY_PATH, json.dumps(document))
+        # Supply the docs builtin explicitly so this test exercises registry policy.
+        suites = {"stack": [], "docs": []}
+        cases = [
+            (["README.md"], ["docs"], []),
+            (["tools/sstack/README.md"], ["docs"], []),
+            (["tools/sstack/skills/sstack/SKILL.md"], ["stack"], []),
+            (["AGENTS.md"], ["stack"], []),
+            (["CLAUDE.md"], ["stack"], []),
+            (["install.py"], ["stack"], []),
+            ([".sstack.json"], ["stack"], []),
+            ([".github/workflows/sstack-quality.yml"], ["stack"], []),
+            (["tools/sstack/control.py"], ["stack"], []),
+            (["README.md", "tools/sstack/control.py"], ["docs", "stack"], []),
+            (["README.md", "other/README.md"], ["docs"], ["other/README.md"]),
+            (["tools/sstack/README.md.backup"], ["stack"], []),
+        ]
+        for files, expected, unknown in cases:
+            with (
+                self.subTest(files=files),
+                patch.object(registry, "changed_files", return_value=files),
+            ):
+                result = registry.coverage(self.root, self.base, suites)
+                self.assertEqual(result["suites"], expected)
+                self.assertEqual(result["unknown_paths"], unknown)
+                self.assertEqual(result["status"], "blocked" if unknown else "passed")
+
     def test_default_root_suites_are_refreshed_after_registration(self):
         path = self.root / registry.REGISTRY_PATH
         document = json.loads(path.read_text())

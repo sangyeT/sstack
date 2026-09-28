@@ -3,8 +3,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from check_contracts import SKILLS, STACK, check
+from check_contracts import SKILLS, STACK, check, main
 
 
 class ContractTests(unittest.TestCase):
@@ -89,6 +90,26 @@ class ContractTests(unittest.TestCase):
         unrelated.mkdir()
         (unrelated / "SKILL.md").write_text("invalid and outside scope")
         self.assertEqual(check(self.root), [])
+
+    def test_root_readme_is_optional_and_checked_only_when_requested(self):
+        self.assertEqual(check(self.root, include_readme=True), [])
+        (self.root / "README.md").write_text("[missing](missing.md)\n")
+        self.assertEqual(check(self.root), [])
+        findings = check(self.root, include_readme=True)
+        self.assertEqual(
+            [(finding.path, finding.code) for finding in findings], [("README.md", "LINK001")]
+        )
+
+    def test_readme_shell_examples_are_never_executed(self):
+        marker = self.root / "executed"
+        (self.root / "README.md").write_text(f"```sh\ntouch {marker}\n```\n")
+        self.assertEqual(check(self.root, include_readme=True), [])
+        self.assertFalse(marker.exists())
+
+    def test_cli_passes_readme_opt_in(self):
+        with patch("check_contracts.check", return_value=[]) as checker, patch("builtins.print"):
+            self.assertEqual(main(["--include-readme"]), 0)
+        checker.assert_called_once_with(include_readme=True)
 
 
 if __name__ == "__main__":

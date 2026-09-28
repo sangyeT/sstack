@@ -28,8 +28,17 @@ def load_suites(root, builtin):
             raise ValueError("suite must contain checks")
         result[suite] = []
         for check in checks:
-            if not isinstance(check, dict) or set(check) != {"name", "cwd", "command"}:
+            required = {"name", "cwd", "command"}
+            optional = {"parallel_safe", "reuse_safe"}
+            if (
+                not isinstance(check, dict)
+                or not required <= set(check)
+                or set(check) - required - optional
+            ):
                 raise ValueError("check requires name, cwd and command")
+            for flag in optional:
+                if flag in check and not isinstance(check[flag], bool):
+                    raise ValueError(f"{flag} must be a boolean")
             name, cwd, command = check["name"], check["cwd"], check["command"]
             if (
                 not isinstance(name, str)
@@ -116,7 +125,12 @@ def load(root, suites):
             raise ValueError(f"missing coverage contract for {name}")
         if set(project["suites"]) - set(suites):
             raise ValueError(f"unknown suite for {name}")
-        for path in project["paths"]:
+        excludes = project.get("exclude_paths", [])
+        if not isinstance(excludes, list) or not all(
+            isinstance(path, str) and path for path in excludes
+        ):
+            raise ValueError(f"invalid exclude_paths for {name}")
+        for path in [*project["paths"], *excludes]:
             if (
                 PurePosixPath(path).is_absolute()
                 or ".." in PurePosixPath(path).parts
@@ -134,6 +148,13 @@ def load(root, suites):
     return projects
 
 
+def matches(path, patterns):
+    return any(
+        path.startswith(pattern) if pattern.endswith("/") else path == pattern
+        for pattern in patterns
+    )
+
+
 def coverage(root, base, suites):
     base_sha = revision(root, base)
     head = revision(root, "HEAD")
@@ -144,10 +165,8 @@ def coverage(root, base, suites):
         owners[path] = sorted(
             project["id"]
             for project in projects
-            if any(
-                path.startswith(pattern) if pattern.endswith("/") else path == pattern
-                for pattern in project["paths"]
-            )
+            if matches(path, project["paths"])
+            and not matches(path, project.get("exclude_paths", []))
         )
     selected = {name for names in owners.values() for name in names}
     while True:

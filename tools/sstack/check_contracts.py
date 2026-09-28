@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -137,11 +138,13 @@ def check_markdown(root: Path, relative: Path, content: str) -> list[Finding]:
     return findings
 
 
-def check(root: Path = ROOT) -> list[Finding]:
+def check(root: Path = ROOT, *, include_readme: bool = False) -> list[Finding]:
     """Check only stack docs, entry instructions, and skill registrations."""
     root = Path(root)
     canonical = root / STACK / "skills"
     documents = {Path("AGENTS.md"), Path("CLAUDE.md"), STACK / "README.md"}
+    if include_readme and (root / "README.md").exists():
+        documents.add(Path("README.md"))
     documents.update(STACK / "skills" / name / "SKILL.md" for name in SKILLS)
     documents.update(
         path.relative_to(root)
@@ -181,8 +184,13 @@ def check(root: Path = ROOT) -> list[Finding]:
     return findings
 
 
-def main() -> int:
-    findings = check()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--include-readme", action="store_true", help="Check root README if present."
+    )
+    args = parser.parse_args(argv)
+    findings = check(include_readme=args.include_readme)
     for finding in findings:
         print(finding)
     if not findings:
