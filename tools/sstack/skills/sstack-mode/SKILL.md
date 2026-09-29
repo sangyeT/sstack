@@ -10,7 +10,7 @@ gate with `control.py verify changed --base <actual-base> --jobs 2`; avoid
 duplicating lint and tests that the selected suites already include.
 
 For a project goal/backlog, use `sstack`; for a dispatched issue use
-`sstack-engineer`. Ordinary questions and small direct edits need no new hierarchy.
+`sstack-engineer`; for a demo use `sstack-demo`. Ordinary questions and small direct edits need no new hierarchy.
 Read skills at `tools/sstack/skills/<name>/SKILL.md` when not auto-discovered.
 
 1. Restate the user outcome and observable acceptance. Read affected source and

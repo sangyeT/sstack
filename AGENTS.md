@@ -8,6 +8,9 @@ Use /sstack plus a project goal for PM delivery. Read tools/sstack/skills/sstack
 Resolve the target project, its instructions and configured PM board before posting.
 Do not default to a previous customer, board, environment or credential.
 
+Use /sstack-demo for demos. Demo code stays under demos/ or on demo/* branches,
+never merges to the default branch and is never ticket completion evidence.
+
 Use independent engineer/reviewer agents for meaningful changes. Parallel writers
 need isolated Git worktrees and nonconflicting live resources. Routine scoped
 validation, commits, pushes and PRs proceed within the authorized task. Respect

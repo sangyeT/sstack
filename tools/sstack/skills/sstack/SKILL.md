@@ -11,6 +11,7 @@ preferences and host switching. Use delivery.md's shortest sufficient path: one
 engineer and one independent verifier/reviewer by default, with selected checks
 running concurrently on a stable artifact. This works with Claude Code or Codex using the
 host's available tools; a skill name alone does not register a subagent.
+Demo requests go to `sstack-demo`; promote an approved demo using its step 5.
 
 Resolve the PM board in this order: the user's explicit board for this goal,
 then the longest matching project override in `.sstack.json`, then its repository

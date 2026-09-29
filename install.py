@@ -12,7 +12,7 @@ CONFIG_SPEC = importlib.util.spec_from_file_location(
 config = importlib.util.module_from_spec(CONFIG_SPEC)
 CONFIG_SPEC.loader.exec_module(config)
 
-SKILLS = ("sstack", "sstack-engineer", "sstack-mode", "sstack-verify")
+SKILLS = ("sstack", "sstack-demo", "sstack-engineer", "sstack-mode", "sstack-verify")
 START = "<!-- sstack:begin -->"
 END = "<!-- sstack:end -->"
 IGNORE_BLOCK = """# sstack generated files

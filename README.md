@@ -168,6 +168,7 @@ their tools, credentials, conversation history and running agents remain separat
 | Skill | Purpose |
 | --- | --- |
 | `sstack` | PM intake, Jira breakdown, dispatch and delivery coordination |
+| `sstack-demo` | Scripted, honestly labeled demos and their promotion to tickets |
 | `sstack-engineer` | Implement a scoped ticket and return tested PR evidence |
 | `sstack-mode` | Research, design, prototypes and direct project work |
 | `sstack-verify` | Validate behavior and maintain project verification recipes |
