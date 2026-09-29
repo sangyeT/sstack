@@ -30,7 +30,7 @@ SCRIPT_OPTIONAL = {"viewport", "ignore_console"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 MARKER = "{run_marker}"
 # One standalone number: not glued to letters, other digits or separators.
-NUMBER = re.compile(r"(?<![\w.,-])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![.,]?\d)")
+NUMBER = re.compile(r"(?<![\w.,-])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![.,]?\d|-?\w)")
 QUERY = re.compile(r"[?#][^\s\"'<>]*")
 VERDICTS = {"pass", "fail"}
 PROBLEMS = ("console_errors", "page_errors", "failed_requests", "blocked_navigations")
@@ -198,13 +198,31 @@ def run(
                 redact(f"{request.method} {request.url} {request.failure}")
             )
 
+    def block(url, route):
+        problems["blocked_navigations"].append(redact(url))
+        route.abort()
+
     def guard(route):
         request = route.request
-        if top_level(request) and origin(request.url) != approved:
-            problems["blocked_navigations"].append(redact(request.url))
-            route.abort()
-        else:
+        if not top_level(request):
             route.continue_()
+        elif origin(request.url) != approved:
+            block(request.url, route)
+        else:
+            # Browsers follow network redirects without routing them, so fetch top-level
+            # pages here and check each redirect target before the browser follows it.
+            try:
+                fetched = route.fetch(max_redirects=0)
+            except PlaywrightError:
+                route.abort()
+                return
+            location = fetched.headers.get("location")
+            if 300 <= fetched.status < 400 and location:
+                target = urljoin(request.url, location)
+                if origin(target) != approved:
+                    block(target, route)
+                    return
+            route.fulfill(response=fetched)
 
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     started = time.monotonic()
@@ -287,6 +305,12 @@ def run(
             failed = record["status"] == "failed"
             record["duration_seconds"] = round(time.monotonic() - step_started, 3)
             steps.append(record)
+        if not failed:
+            try:
+                page.wait_for_load_state(timeout=timeout_ms)
+                page.wait_for_timeout(500)
+            except PlaywrightError as error:
+                problems["page_errors"].append(redact(str(error).splitlines()[0]))
         browser_version = browser.version
         context.close()
         browser.close()

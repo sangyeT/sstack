@@ -30,7 +30,8 @@ Actions: `goto` (path relative to `base_url`), `click`, `fill`, `press`,
 role and visible-text selectors over generated class names. `{run_marker}` is
 replaced by a value unique to each run, so readback can match this run's records.
 The first failed step stops the run; later steps are reported as skipped.
-`capture` with `"as": "number"` needs exactly one standalone number in the text.
+`capture` with `"as": "number"` needs exactly one standalone number in the text;
+ranges, dates and numbers with attached units such as `5px` are rejected.
 `ignore_console` patterns only suppress known console noise; they never hide page
 errors or failed requests. Failed requests are network failures and 5xx responses
 on the approved origin, plus 4xx responses for its top-level pages.
@@ -45,8 +46,11 @@ python tools/sstack/ui_eval.py review artifacts/sstack/ui/<run>/report.json VERD
 
 - `--approved-origin` is the human-approved UI host. The script's `base_url` must
   match it and `goto` paths must stay under it. Top-level navigation elsewhere,
-  including links, redirects, delayed scripts and popups, is aborted before the
-  request is sent and fails the run. UI actions can write data, so the origin needs
+  including links, server redirects, delayed scripts and popups, is aborted before
+  the request is sent and fails the run. The run waits briefly after the last step
+  to catch late navigation. Top-level pages are fetched by the tool so redirects
+  can be checked; a login redirect to another host therefore fails the run, so
+  start from a saved session. UI actions can write data, so the origin needs
   the same approval as any other write there; for Kizen follow
   [platform](platform.md) and use the confirmed UI host, which may differ from the
   API host.

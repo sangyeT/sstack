@@ -30,6 +30,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.hosts.append(self.headers["Host"].split(":")[0])
         path = self.path.split("?")[0]
+        redirects = {"/home": "/", "/leave": f"http://localhost:{self.server.server_port}/x"}
+        if path in redirects:
+            self.send_response(302)
+            self.send_header("Location", redirects[path])
+            self.end_headers()
+            return
         page = PAGES.get(path)
         status = 200 if page else 500 if path == "/boom" else 404
         body = (page or "missing").replace("{port}", str(self.server.server_port)).encode()
@@ -109,7 +115,7 @@ class ValidationTests(unittest.TestCase):
         ]:
             with self.subTest(text=text):
                 self.assertEqual(ui_eval.captured(text, "number"), expected)
-        for text in ("none", "1,2,3", "1.234,5", "60% of 100"):
+        for text in ("none", "1,2,3", "1.234,5", "60% of 100", "5-10", "2024-01-05", "1e5"):
             with self.subTest(text=text), self.assertRaises(ValueError):
                 ui_eval.captured(text, "number")
 
@@ -263,6 +269,23 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual(report["status"], "failed", report)
                 self.assertTrue(report["blocked_navigations"], report)
                 self.assertNotIn("localhost", self.server.hosts)
+
+    def test_redirects_are_checked_before_the_browser_follows_them(self):
+        home = self.run_script({"action": "goto", "path": "/home"}, self.click("#go"))
+        self.assertEqual(home["status"], "passed", home)
+        self.server.hosts.clear()
+        leave = self.run_script({"action": "goto", "path": "/leave"})
+        self.assertEqual(leave["status"], "failed", leave)
+        self.assertEqual(
+            leave["blocked_navigations"], [f"http://localhost:{self.server.server_port}/x"]
+        )
+        self.assertNotIn("localhost", self.server.hosts)
+
+    def test_navigation_after_the_last_step_is_caught(self):
+        report = self.run_script(self.click("#later"))
+        self.assertEqual(report["status"], "failed", report)
+        self.assertTrue(report["blocked_navigations"], report)
+        self.assertNotIn("localhost", self.server.hosts)
 
     def test_unapproved_origin_is_refused_before_launch(self):
         with self.assertRaises(ValueError):
