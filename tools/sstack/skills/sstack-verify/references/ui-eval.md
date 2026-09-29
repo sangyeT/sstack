@@ -46,12 +46,13 @@ python tools/sstack/ui_eval.py review artifacts/sstack/ui/<run>/report.json VERD
 
 - `--approved-origin` is the human-approved UI host. The script's `base_url` must
   match it and `goto` paths must stay under it. Top-level navigation elsewhere,
-  including links, server redirects, delayed scripts and popups, is aborted before
-  the request is sent and fails the run. The run waits briefly after the last step
-  to catch late navigation. Top-level pages are fetched by the tool so redirects
-  can be checked; a login redirect to another host therefore fails the run, so
-  start from a saved session. UI actions can write data, so the origin needs
-  the same approval as any other write there; for Kizen follow
+  including links, server redirects at any hop, delayed scripts and popups, is
+  aborted before the request is sent and fails the run. The tool fetches top-level
+  pages itself and turns each same-origin redirect into a new checked navigation;
+  chains over 20 hops and 307/308 redirects of form posts fail. The run waits
+  briefly after the last step to catch late navigation. A login redirect to another
+  host fails the run, so start from a saved session. UI actions can write data, so
+  the origin needs the same approval as any other write there; for Kizen follow
   [platform](platform.md) and use the confirmed UI host, which may differ from the
   API host.
 - `--storage-state` is a saved login session and must live outside the repository.

@@ -173,6 +173,7 @@ def run(
     marker = "sstack-" + secrets.token_hex(4)
     ignore = [re.compile(pattern) for pattern in script.get("ignore_console", [])]
     problems = {kind: [] for kind in PROBLEMS}
+    hops = {"count": 0}
     popups = []
 
     def console(message):
@@ -209,20 +210,31 @@ def run(
         elif origin(request.url) != approved:
             block(request.url, route)
         else:
-            # Browsers follow network redirects without routing them, so fetch top-level
-            # pages here and check each redirect target before the browser follows it.
+            # Browsers follow network redirects without routing them. Fetch top-level pages
+            # here and replace each redirect with a new navigation, which is routed again.
             try:
                 fetched = route.fetch(max_redirects=0)
-            except PlaywrightError:
+            except PlaywrightError as error:
+                problems["failed_requests"].append(redact(str(error).splitlines()[0]))
                 route.abort()
                 return
             location = fetched.headers.get("location")
-            if 300 <= fetched.status < 400 and location:
-                target = urljoin(request.url, location)
-                if origin(target) != approved:
-                    block(target, route)
-                    return
-            route.fulfill(response=fetched)
+            if not (300 <= fetched.status < 400 and location):
+                hops["count"] = 0
+                route.fulfill(response=fetched)
+                return
+            target = urljoin(request.url, location)
+            hops["count"] += 1
+            if origin(target) != approved:
+                block(target, route)
+            elif hops["count"] > 20 or (fetched.status in {307, 308} and request.method != "GET"):
+                block(f"unsupported redirect {fetched.status} to {target}", route)
+            else:
+                script = json.dumps(target).replace("<", "\\u003c")
+                route.fulfill(
+                    content_type="text/html",
+                    body=f"<!doctype html><script>location.replace({script})</script>",
+                )
 
     started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     started = time.monotonic()
