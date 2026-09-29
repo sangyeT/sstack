@@ -1,10 +1,11 @@
 # Scripted UI evaluation
 
 `tools/sstack/ui_eval.py` drives a JSON UI script in Chromium, screenshots every
-step, and records console errors, page errors, failed requests on the approved
-origin, and captured values in one `report.json`. An agent then views each
-screenshot and records a visual verdict. It works for any web UI, including the
-Kizen UI; it does not call the Kizen API or prove that a record was persisted.
+step, and records console errors, page errors, failed requests and captured
+values in one `report.json`. An agent then views each screenshot and records a
+visual verdict. It is built for web UIs such as the Kizen UI but has not yet been
+exercised against a live Kizen login (SSO, MFA, session expiry). It does not call
+the Kizen API or prove that a record was persisted.
 
 Install `tools/sstack/requirements-dev.txt` (includes Playwright) and, where no
 Chromium is preinstalled, run `python -m playwright install chromium`.
@@ -29,6 +30,10 @@ Actions: `goto` (path relative to `base_url`), `click`, `fill`, `press`,
 role and visible-text selectors over generated class names. `{run_marker}` is
 replaced by a value unique to each run, so readback can match this run's records.
 The first failed step stops the run; later steps are reported as skipped.
+`capture` with `"as": "number"` needs exactly one standalone number in the text.
+`ignore_console` patterns only suppress known console noise; they never hide page
+errors or failed requests. Failed requests are network failures and 5xx responses
+on the approved origin, plus 4xx responses for its top-level pages.
 
 ## Run and review
 
@@ -39,8 +44,10 @@ python tools/sstack/ui_eval.py review artifacts/sstack/ui/<run>/report.json VERD
 ```
 
 - `--approved-origin` is the human-approved UI host. The script's `base_url` must
-  match it, and navigation away from it fails the step. UI actions can write data,
-  so the origin needs the same approval as any other write there; for Kizen follow
+  match it and `goto` paths must stay under it. Top-level navigation elsewhere,
+  including links, redirects, delayed scripts and popups, is aborted before the
+  request is sent and fails the run. UI actions can write data, so the origin needs
+  the same approval as any other write there; for Kizen follow
   [platform](platform.md) and use the confirmed UI host, which may differ from the
   API host.
 - `--storage-state` is a saved login session and must live outside the repository.
@@ -59,5 +66,5 @@ python tools/sstack/ui_eval.py review artifacts/sstack/ui/<run>/report.json VERD
 `evidence`) for `surface: "ui"` cases in the
 [evaluation contract](../../sstack/references/jira-handoff.md#pm-owned-evaluation-sets).
 Rendered values are UI proof only; persisted Kizen results still need readback.
-Reports and screenshots can show record data; use synthetic records and inspect
-them before sharing.
+Recorded URLs drop query strings and fragments. Reports and screenshots can still
+show record data; use synthetic records and inspect them before sharing.

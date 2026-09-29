@@ -1,4 +1,3 @@
-import importlib.util
 import json
 import os
 import tempfile
@@ -9,7 +8,6 @@ from pathlib import Path
 
 import ui_eval
 
-HAS_BROWSER = importlib.util.find_spec("playwright") is not None
 PAGES = {
     "/": """<!doctype html><title>Allocation</title>
 <label>Stocks <input id="stocks"></label><label>Bonds <input id="bonds"></label>
@@ -18,16 +16,24 @@ PAGES = {
   result.textContent = 'Stocks ' + Math.round(100 * s / t) + '%';
   owner.textContent = note.value;">Show</button>
 <input id="note"><p id="result"></p><p id="owner"></p>
-<a id="away" href="http://localhost:{port}/">Away</a>
-<button id="noisy" onclick="console.error('boom')">Noisy</button>""",
+<a id="away" href="http://localhost:{port}/away">Away</a>
+<button id="later" onclick="setTimeout(() => location = 'http://localhost:{port}/later', 50)">
+Later</button>
+<button id="popup" onclick="window.open('http://localhost:{port}/popup')">Popup</button>
+<button id="noisy" onclick="console.error('boom')">Noisy</button>
+<button id="throw" onclick="setTimeout(() => { throw new Error('kaput') })">Throw</button>
+<button id="broken" onclick="fetch('/boom?token=secret')">Broken</button>""",
 }
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        page = PAGES.get(self.path)
+        self.server.hosts.append(self.headers["Host"].split(":")[0])
+        path = self.path.split("?")[0]
+        page = PAGES.get(path)
+        status = 200 if page else 500 if path == "/boom" else 404
         body = (page or "missing").replace("{port}", str(self.server.server_port)).encode()
-        self.send_response(200 if page else 404)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html")
         self.end_headers()
         self.wfile.write(body)
@@ -44,24 +50,40 @@ def script(base, *steps):
     }
 
 
+def capture(**extra):
+    return {"action": "capture", "selector": "x", "case": "c", "key": "k", **extra}
+
+
 class ValidationTests(unittest.TestCase):
     def test_rejects_unsafe_or_malformed_scripts(self):
+        base = "https://a.test"
         cases = [
             {"schema_version": 1, "base_url": "http://example.com", "steps": [{}]},
-            script("https://a.test", {"action": "goto", "path": "https://b.test/"}),
-            script("https://a.test", {"action": "click"}),
-            script("https://a.test", {"action": "eval", "selector": "x"}),
-            script("https://a.test", {"action": "click", "selector": "x", "id": "bad id"}),
-            script(
-                "https://a.test",
-                {"action": "capture", "selector": "x", "case": "c", "key": "k", "as": "html"},
+            *(
+                script(base, {"action": "goto", "path": path})
+                for path in (
+                    "https://b.test/",
+                    "//b.test/",
+                    "/\\b.test/",
+                    "http:b.test/x",
+                    "file:///etc/passwd",
+                    "javascript:alert(1)",
+                    "records",
+                )
             ),
-            {**script("https://a.test"), "extra": True},
+            script(base, {"action": "click"}),
+            script(base, {"action": "eval", "selector": "x"}),
+            script(base, {"action": "click", "selector": "x", "id": "bad id"}),
+            script(base, capture(**{"as": "html"})),
+            script(base, capture(), capture(id="again")),
+            script(base, capture(case=" c")),
+            {**script(base), "ignore_console": ["("]},
+            {**script(base), "extra": True},
         ]
         for case in cases:
             with self.subTest(case=case), self.assertRaises(ValueError):
                 ui_eval.validate_script(case)
-        ui_eval.validate_script(script("http://127.0.0.1:8000"))
+        ui_eval.validate_script(script("http://127.0.0.1:8000", capture()))
 
     def test_storage_state_must_live_outside_repository(self):
         with tempfile.TemporaryDirectory() as root:
@@ -74,20 +96,53 @@ class ValidationTests(unittest.TestCase):
                     ui_eval.check_storage_state(outside.name, root), Path(outside.name).resolve()
                 )
 
-    def test_numeric_capture_parses_displayed_values(self):
-        self.assertEqual(ui_eval.captured("Stocks 60%", "number"), 60)
-        self.assertEqual(ui_eval.captured("$1,234.50", "number"), 1234.5)
-        with self.assertRaises(ValueError):
-            ui_eval.captured("none", "number")
+    def test_numeric_capture_takes_exactly_one_standalone_number(self):
+        for text, expected in [
+            ("Stocks 60%", 60),
+            ("60.0%", 60),
+            ("$1,234.50", 1234.5),
+            ("Q3 total 60", 60),
+            ("Item-5 total 60", 60),
+            ("Change -12", -12),
+            ("Change −12", -12),
+            ("(1,234)", -1234),
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(ui_eval.captured(text, "number"), expected)
+        for text in ("none", "1,2,3", "1.234,5", "60% of 100"):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                ui_eval.captured(text, "number")
+
+    def test_review_rejects_reports_without_reviewable_screenshots(self):
+        with tempfile.TemporaryDirectory() as folder:
+            report = Path(folder, "report.json")
+            verdicts = {"reviewer": "r", "steps": {}}
+            for content in (
+                [],
+                {"status": "passed"},
+                {"status": "passed", "steps": []},
+                {"status": "passed", "steps": [{"status": "passed"}]},
+                {"status": "passed", "steps": [{"id": "a", "status": "passed"}]},
+            ):
+                report.write_text(json.dumps(content))
+                with self.subTest(content=content), self.assertRaises(ValueError):
+                    ui_eval.review(report, verdicts)
 
 
-@unittest.skipUnless(
-    HAS_BROWSER or os.environ.get("SSTACK_REQUIRE_BROWSER"), "playwright not installed"
-)
 class BrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        try:
+            from playwright.sync_api import Error, sync_playwright
+
+            with sync_playwright() as playwright:
+                playwright.chromium.launch().close()
+        except (ImportError, Error) as error:
+            if os.environ.get("SSTACK_REQUIRE_BROWSER"):
+                raise
+            raise unittest.SkipTest(f"Chromium unavailable: {type(error).__name__}") from error
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.server.hosts = []
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
         cls.base = f"http://127.0.0.1:{cls.server.server_port}"
 
@@ -100,16 +155,22 @@ class BrowserTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.out = Path(temp.name)
+        self.server.hosts.clear()
 
-    def run_script(self, *steps):
-        return ui_eval.run(script(self.base, *steps), approved_origin=self.base, out_dir=self.out)
+    def run_script(self, *steps, **extra):
+        return ui_eval.run(
+            {**script(self.base, *steps), **extra}, approved_origin=self.base, out_dir=self.out
+        )
+
+    def click(self, selector, **extra):
+        return {"action": "click", "selector": selector, **extra}
 
     def test_scripted_path_captures_values_screenshots_and_review(self):
         report = self.run_script(
             {"action": "fill", "selector": "#stocks", "value": "6000"},
             {"action": "fill", "selector": "#bonds", "value": "4000"},
             {"action": "fill", "selector": "#note", "value": "{run_marker}"},
-            {"action": "click", "selector": "#go", "id": "show"},
+            self.click("#go", id="show"),
             {"action": "expect_text", "selector": "#owner", "text": "{run_marker}"},
             {
                 "action": "capture",
@@ -149,29 +210,59 @@ class BrowserTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ui_eval.review(self.out / "report.json", complete)
 
-    def test_failed_expectation_stops_later_steps(self):
+    def test_failed_expectation_stops_later_steps_and_fails_review(self):
         report = self.run_script(
             {"action": "expect_text", "selector": "#result", "text": "never", "timeout_ms": 300},
-            {"action": "click", "selector": "#go"},
+            self.click("#go"),
         )
         self.assertEqual(report["status"], "failed")
         self.assertEqual([s["status"] for s in report["steps"]], ["passed", "failed", "skipped"])
         self.assertIn("screenshot", report["steps"][1])
+        ids = [step["id"] for step in report["steps"][:2]]
+        verdicts = {"reviewer": "r", "steps": dict.fromkeys(ids, {"verdict": "pass", "note": "ok"})}
+        result = ui_eval.review(self.out / "report.json", verdicts)
+        self.assertEqual(
+            (result["status"], result["reasons"]), ("failed", ["automated_checks_failed"])
+        )
 
     def test_console_errors_fail_unless_ignored(self):
-        noisy = {"action": "click", "selector": "#noisy"}
+        noisy = self.click("#noisy")
         self.assertEqual(self.run_script(noisy)["console_errors"], ["boom"])
-        quiet = {**script(self.base, noisy), "ignore_console": ["^boom$"]}
-        report = ui_eval.run(quiet, approved_origin=self.base, out_dir=self.out)
+        report = self.run_script(noisy, ignore_console=["^boom$"])
         self.assertEqual(report["status"], "passed", report)
 
-    def test_navigation_off_the_approved_origin_fails(self):
-        report = self.run_script(
-            {"action": "click", "selector": "#away"}, {"action": "wait_for", "selector": "#go"}
+    def test_page_errors_and_server_errors_fail_with_redacted_urls(self):
+        wait = {"action": "wait_for", "selector": "#go", "timeout_ms": 300}
+        thrown = self.run_script(self.click("#throw"), wait, wait, ignore_console=[".*"])
+        self.assertEqual(thrown["status"], "failed")
+        self.assertIn("kaput", thrown["page_errors"][0])
+        broken = self.run_script(self.click("#broken"), wait, wait, ignore_console=[".*"])
+        self.assertEqual(broken["status"], "failed")
+        self.assertEqual(broken["failed_requests"], [f"500 {self.base}/boom?…"])
+        self.assertNotIn("secret", json.dumps(broken))
+
+    def test_missing_top_level_page_fails(self):
+        report = ui_eval.run(
+            {
+                "schema_version": 1,
+                "base_url": self.base,
+                "steps": [{"action": "goto", "path": "/x"}],
+            },
+            approved_origin=self.base,
+            out_dir=self.out,
         )
         self.assertEqual(report["status"], "failed")
-        errors = [step.get("error", "") for step in report["steps"]]
-        self.assertTrue(any(e.startswith("off_origin_navigation") for e in errors), errors)
+        self.assertEqual(report["failed_requests"], [f"404 {self.base}/x"])
+
+    def test_off_origin_navigation_is_blocked_before_any_request(self):
+        for trigger in ("#away", "#later", "#popup"):
+            with self.subTest(trigger=trigger):
+                self.server.hosts.clear()
+                wait = {"action": "wait_for", "selector": "#go", "timeout_ms": 300}
+                report = self.run_script(self.click(trigger), wait, wait)
+                self.assertEqual(report["status"], "failed", report)
+                self.assertTrue(report["blocked_navigations"], report)
+                self.assertNotIn("localhost", self.server.hosts)
 
     def test_unapproved_origin_is_refused_before_launch(self):
         with self.assertRaises(ValueError):

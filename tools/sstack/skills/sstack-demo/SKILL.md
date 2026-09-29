@@ -62,9 +62,10 @@ the image, against the script's visible result and record verdicts with
 
 ## 4. Rehearse
 
-Run `ui_eval.py run` twice more with fresh markers within the time budget. Both
-runs must pass automated checks and visual review. For a customer-facing demo, optionally ask a fresh agent to review only the
-recording and script: does it tell the story, and what would confuse the audience?
+Run `ui_eval.py run` twice more with fresh markers within the time budget. Both runs
+must pass automated checks and visual review. For a customer-facing demo, optionally
+ask a fresh agent to review only the recording and script: does it tell the story,
+and what would confuse the audience?
 
 Report the branch, URL or launch command, recording or screenshots, rehearsal
 results and the faked list. Stakeholder feedback returns to step 1.

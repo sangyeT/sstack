@@ -29,8 +29,11 @@ SCRIPT_REQUIRED = {"schema_version", "base_url", "steps"}
 SCRIPT_OPTIONAL = {"viewport", "ignore_console"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 MARKER = "{run_marker}"
-NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+# One standalone number: not glued to letters, other digits or separators.
+NUMBER = re.compile(r"(?<![\w.,-])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![.,]?\d)")
+QUERY = re.compile(r"[?#][^\s\"'<>]*")
 VERDICTS = {"pass", "fail"}
+PROBLEMS = ("console_errors", "page_errors", "failed_requests", "blocked_navigations")
 
 
 def origin(url):
@@ -38,9 +41,14 @@ def origin(url):
     return f"{parts.scheme}://{parts.netloc}".lower()
 
 
+def redact(text):
+    """Drop URL queries and fragments, which can carry tokens or signed parameters."""
+    return QUERY.sub("?…", text)[:300]
+
+
 def _text(value, name):
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name}: nonempty text required")
+    if not isinstance(value, str) or not value.strip() or value != value.strip():
+        raise ValueError(f"{name}: nonempty trimmed text required")
 
 
 def validate_script(script):
@@ -70,11 +78,14 @@ def validate_script(script):
         raise ValueError("script: ignore_console must be a list of patterns")
     for pattern in ignore:
         _text(pattern, "ignore_console")
-        re.compile(pattern)
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"ignore_console: invalid pattern {pattern!r}") from error
     steps = script["steps"]
     if not isinstance(steps, list) or not steps:
         raise ValueError("script: steps required")
-    identifiers = set()
+    identifiers, captures = set(), set()
     for index, step in enumerate(steps, 1):
         if not isinstance(step, dict) or step.get("action") not in ACTIONS:
             raise ValueError(f"step {index}: unknown action")
@@ -84,10 +95,19 @@ def validate_script(script):
             raise ValueError(f"step {index}: fields for {step['action']} are {sorted(required)}")
         for key in required:
             _text(step[key], f"step {index}.{key}")
-        if step["action"] == "goto" and urlsplit(step["path"]).netloc:
-            raise ValueError(f"step {index}: goto takes a path relative to base_url")
+        if step["action"] == "goto" and (
+            not step["path"].startswith("/")
+            or step["path"].startswith("//")
+            or "\\" in step["path"]
+            or origin(urljoin(script["base_url"], step["path"])) != origin(script["base_url"])
+        ):
+            raise ValueError(f"step {index}: goto path must start with / under base_url")
         if step.get("as", "text") not in {"text", "number"}:
             raise ValueError(f"step {index}: capture as must be text or number")
+        if step["action"] == "capture":
+            if (step["case"], step["key"]) in captures:
+                raise ValueError(f"step {index}: duplicate capture of {step['case']}.{step['key']}")
+            captures.add((step["case"], step["key"]))
         timeout = step.get("timeout_ms", 1)
         if type(timeout) is not int or timeout <= 0:
             raise ValueError(f"step {index}: timeout_ms must be a positive integer")
@@ -111,11 +131,16 @@ def check_storage_state(path, root=ROOT):
 def captured(text, kind):
     if kind == "text":
         return text.strip()
-    match = NUMBER.search(text)
-    if not match:
-        raise ValueError(f"capture_not_numeric: {text.strip()[:80]!r}")
-    number = match.group().replace(",", "")
-    return float(number) if "." in number else int(number)
+    normalized = text.replace("−", "-")
+    matches = list(NUMBER.finditer(normalized))
+    if len(matches) != 1:
+        raise ValueError(f"capture_needs_one_number: {text.strip()[:80]!r}")
+    match = matches[0]
+    number = float(match.group().replace(",", ""))
+    before, after = normalized[: match.start()].rstrip(), normalized[match.end() :].lstrip()
+    if before.endswith("(") and after.startswith(")"):
+        number = -number
+    return int(number) if number.is_integer() else number
 
 
 def digest(path):
@@ -131,6 +156,7 @@ def run(
     headed=False,
     video=False,
     timeout_ms=15000,
+    root=ROOT,
 ):
     """Run the script against the approved origin only; UI actions may write data."""
     from playwright.sync_api import Error as PlaywrightError
@@ -140,16 +166,47 @@ def run(
     approved = origin(approved_origin)
     if origin(script["base_url"]) != approved:
         raise ValueError("base_url origin differs from the approved origin")
+    if storage_state:
+        storage_state = check_storage_state(storage_state, root)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     marker = "sstack-" + secrets.token_hex(4)
     ignore = [re.compile(pattern) for pattern in script.get("ignore_console", [])]
-    problems = {"console_errors": [], "page_errors": [], "failed_requests": []}
+    problems = {kind: [] for kind in PROBLEMS}
+    popups = []
 
-    def note(kind, text):
-        if not any(pattern.search(text) for pattern in ignore):
-            problems[kind].append(text[:300])
+    def console(message):
+        if message.type == "error" and not any(p.search(message.text) for p in ignore):
+            problems["console_errors"].append(redact(message.text))
 
+    def top_level(request):
+        if not request.is_navigation_request():
+            return False
+        try:
+            return request.frame.parent_frame is None
+        except PlaywrightError:
+            return True  # A popup's first navigation precedes its frame.
+
+    def response(item):
+        top = top_level(item.request)
+        if origin(item.url) == approved and (item.status >= 500 or (top and item.status >= 400)):
+            problems["failed_requests"].append(redact(f"{item.status} {item.url}"))
+
+    def failed_request(request):
+        if origin(request.url) == approved:
+            problems["failed_requests"].append(
+                redact(f"{request.method} {request.url} {request.failure}")
+            )
+
+    def guard(route):
+        request = route.request
+        if top_level(request) and origin(request.url) != approved:
+            problems["blocked_navigations"].append(redact(request.url))
+            route.abort()
+        else:
+            route.continue_()
+
+    started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     started = time.monotonic()
     steps, observed, evidence = [], {}, {}
     with sync_playwright() as playwright:
@@ -160,20 +217,15 @@ def run(
         if video:
             options["record_video_dir"] = str(out / "video")
         context = browser.new_context(**options)
+        context.route("**/*", guard)
+        context.on("console", console)
+        context.on(
+            "weberror", lambda error: problems["page_errors"].append(redact(str(error.error)))
+        )
+        context.on("response", response)
+        context.on("requestfailed", failed_request)
         page = context.new_page()
-        page.on("console", lambda msg: msg.type == "error" and note("console_errors", msg.text))
-        page.on("pageerror", lambda error: note("page_errors", str(error)))
-        page.on(
-            "requestfailed",
-            lambda request: origin(request.url) == approved
-            and note("failed_requests", f"{request.method} {request.url} {request.failure}"),
-        )
-        page.on(
-            "response",
-            lambda response: origin(response.url) == approved
-            and response.status >= 500
-            and note("failed_requests", f"{response.status} {response.url}"),
-        )
+        context.on("page", lambda opened: popups.append(redact(opened.url)))
         failed = False
         for index, step in enumerate(script["steps"], 1):
             identifier = step.get("id", f"step-{index}")
@@ -182,14 +234,19 @@ def run(
                 steps.append({**record, "status": "skipped"})
                 continue
             timeout = step.get("timeout_ms", timeout_ms)
+            blocked = len(problems["blocked_navigations"])
             step_started = time.monotonic()
+            value = None
             try:
                 selector = step.get("selector")
                 locator = page.locator(selector) if selector else None
                 action = step["action"]
                 if action == "goto":
                     path = step["path"].replace(MARKER, marker)
-                    page.goto(urljoin(script["base_url"], path), timeout=timeout)
+                    target = urljoin(script["base_url"], path)
+                    if origin(target) != approved:
+                        raise ValueError("off_origin_navigation: goto target")
+                    page.goto(target, timeout=timeout)
                 elif action == "click":
                     locator.click(timeout=timeout)
                 elif action == "fill":
@@ -203,24 +260,31 @@ def run(
                     expect(locator).to_contain_text(expected, timeout=timeout)
                 else:
                     value = captured(locator.inner_text(timeout=timeout), step.get("as", "text"))
-                    observed.setdefault(step["case"], {})[step["key"]] = value
-                    record["observed"] = value
+                if len(problems["blocked_navigations"]) > blocked:
+                    raise ValueError("off_origin_navigation: blocked")
                 if origin(page.url) != approved:
                     raise ValueError(f"off_origin_navigation: {origin(page.url)}")
                 record["status"] = "passed"
             except (PlaywrightError, AssertionError, ValueError) as error:
                 record["status"] = "failed"
-                record["error"] = str(error).splitlines()[0][:300]
-                failed = True
-            screenshot = out / f"step-{index:02d}-{identifier}.png"
-            try:
-                page.screenshot(path=str(screenshot), full_page=True)
-                record["screenshot"] = screenshot.name
-                record["screenshot_sha256"] = digest(screenshot)
-                if step["action"] == "capture" and record["status"] == "passed":
-                    evidence.setdefault(step["case"], []).append(f"ui-screenshot:{screenshot.name}")
-            except PlaywrightError as error:
-                record["screenshot_error"] = str(error).splitlines()[0][:300]
+                record["error"] = redact(str(error).splitlines()[0])
+            if origin(page.url) == approved:
+                screenshot = out / f"step-{index:02d}-{identifier}.png"
+                try:
+                    page.screenshot(path=str(screenshot), full_page=True)
+                    record["screenshot"] = screenshot.name
+                    record["screenshot_sha256"] = digest(screenshot)
+                except PlaywrightError as error:
+                    record["status"] = "failed"
+                    record["screenshot_error"] = redact(str(error).splitlines()[0])
+            else:
+                record["status"] = "failed"
+                record["screenshot_error"] = "page is off the approved origin"
+            if record["status"] == "passed" and step["action"] == "capture":
+                observed.setdefault(step["case"], {})[step["key"]] = value
+                record["observed"] = value
+                evidence.setdefault(step["case"], []).append(f"ui-screenshot:{screenshot.name}")
+            failed = record["status"] == "failed"
             record["duration_seconds"] = round(time.monotonic() - step_started, 3)
             steps.append(record)
         browser_version = browser.version
@@ -237,12 +301,13 @@ def run(
         ).hexdigest(),
         "run_marker": marker,
         "browser": f"chromium {browser_version}",
-        "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "started_at": started_at,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "steps": steps,
         **problems,
+        "popups": popups,
         "eval_cases": [
-            {"id": case, "observed": values, "evidence": evidence.get(case, [])}
+            {"id": case, "observed": values, "evidence": evidence[case]}
             for case, values in observed.items()
         ],
         "scope": "automated UI checks only; screenshots need visual review",
@@ -251,22 +316,36 @@ def run(
     return report
 
 
+def _report_steps(report):
+    if not isinstance(report, dict) or report.get("status") not in {"passed", "failed"}:
+        raise ValueError("report: not a ui_eval run report")
+    steps = report.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("report: steps required")
+    for step in steps:
+        if not isinstance(step, dict) or not isinstance(step.get("id"), str):
+            raise ValueError("report: malformed step")
+        if step.get("status") != "skipped" and not isinstance(step.get("screenshot"), str):
+            raise ValueError(f"report: step {step['id']} has no screenshot to review")
+    return {step["id"]: step for step in steps if step.get("status") != "skipped"}
+
+
 def review(report_path, verdicts):
     """Bind an agent's per-screenshot visual verdicts to the recorded evidence."""
     report_path = Path(report_path)
     report = json.loads(report_path.read_text())
+    shots = _report_steps(report)
     if not isinstance(verdicts, dict) or set(verdicts) != {"reviewer", "steps"}:
         raise ValueError("verdicts: reviewer and steps required")
     _text(verdicts["reviewer"], "reviewer")
     given = verdicts["steps"]
     if not isinstance(given, dict):
         raise ValueError("verdicts: steps must map step ids to verdicts")
-    shots = {step["id"]: step for step in report["steps"] if "screenshot" in step}
     if set(given) - set(shots):
-        raise ValueError("verdicts: unknown or unscreenshotted step ids")
+        raise ValueError("verdicts: unknown or skipped step ids")
     reasons, results = [], {}
     for identifier, step in shots.items():
-        if digest(report_path.parent / step["screenshot"]) != step["screenshot_sha256"]:
+        if digest(report_path.parent / step["screenshot"]) != step.get("screenshot_sha256"):
             raise ValueError(f"screenshot changed since the run: {step['screenshot']}")
         verdict = given.get(identifier)
         if verdict is None:
@@ -320,13 +399,11 @@ def main(argv=None):
         if args.command == "run":
             stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             out = args.out or ROOT / "artifacts/sstack/ui" / f"{stamp}-{secrets.token_hex(4)}"
-            state = check_storage_state(args.storage_state) if args.storage_state else None
-            script = validate_script(json.loads(Path(args.script).read_text()))
             result = run(
-                script,
+                json.loads(Path(args.script).read_text()),
                 approved_origin=args.approved_origin,
                 out_dir=out,
-                storage_state=state,
+                storage_state=args.storage_state,
                 headed=args.headed,
                 video=args.video,
                 timeout_ms=args.timeout_ms,
