@@ -42,9 +42,9 @@ Script changes from stakeholder feedback are expected, not violations.
 ## 2. Build and self-check
 
 Reuse existing app code, templates and seed data before writing new ones. Start
-from a clean reset that removes this demo's earlier sandbox records, then drive
-each step with a browser tool, check the visible result, and record the run or
-save a screenshot per step. Treat console errors, failed requests and blank states
+from a clean app state with a fresh run marker; leave earlier sandbox records
+in place rather than deleting them. Drive each step with a browser tool, check
+the visible result, and record the run or save a screenshot per step. Treat console errors, failed requests and blank states
 on the path as failures. Fix and rerun until every step passes.
 
 ## 3. Honesty check
