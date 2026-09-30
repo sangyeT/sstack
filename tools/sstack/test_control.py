@@ -71,13 +71,16 @@ class VerificationTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
 
     def test_absent_suites_block_doctor_and_are_not_silently_omitted(self):
-        with patch.object(control, "run_check") as run:
+        with (
+            patch.object(control, "SUITES", control.BUILTIN_SUITES),
+            patch.object(control, "run_check") as run,
+        ):
             report = control.verify("all", root=self.root)
+            diagnostics = control.doctor(self.root)
         run.assert_not_called()
         self.assertEqual(len(report["checks"]), 3)
         self.assertEqual({item["status"] for item in report["checks"]}, {"blocked"})
         self.assertEqual(report["status"], "blocked")
-        diagnostics = control.doctor(self.root)
         self.assertEqual(diagnostics["status"], "blocked")
         self.assertEqual(diagnostics["verification"], "not_run")
         self.assertEqual(set(diagnostics["readiness"]), {"stack", "docs"})

@@ -29,14 +29,15 @@ def load_suites(root, builtin):
         result[suite] = []
         for check in checks:
             required = {"name", "cwd", "command"}
-            optional = {"parallel_safe", "reuse_safe"}
+            flags = {"parallel_safe", "reuse_safe"}
+            optional = flags | {"min_python", "requires"}
             if (
                 not isinstance(check, dict)
                 or not required <= set(check)
                 or set(check) - required - optional
             ):
                 raise ValueError("check requires name, cwd and command")
-            for flag in optional:
+            for flag in flags:
                 if flag in check and not isinstance(check[flag], bool):
                     raise ValueError(f"{flag} must be a boolean")
             name, cwd, command = check["name"], check["cwd"], check["command"]
@@ -64,6 +65,28 @@ def load_suites(root, builtin):
                 or not all(isinstance(arg, str) and arg and "\0" not in arg for arg in command)
             ):
                 raise ValueError("command must be a nonempty argument list")
+            if "min_python" in check and not (
+                isinstance(check["min_python"], str)
+                and re.fullmatch(r"[0-9]+\.[0-9]+", check["min_python"])
+            ):
+                raise ValueError("min_python must be a MAJOR.MINOR string")
+            if "requires" in check:
+                requires = check["requires"]
+                if not isinstance(requires, list) or not requires:
+                    raise ValueError("requires must be a nonempty list of paths")
+                for entry in requires:
+                    if (
+                        not isinstance(entry, str)
+                        or not entry
+                        or "\0" in entry
+                        or PurePosixPath(entry).is_absolute()
+                        or ".." in PurePosixPath(entry).parts
+                    ):
+                        raise ValueError("unsafe required path")
+                    try:
+                        (root / cwd / entry).resolve().relative_to(root.resolve())
+                    except ValueError as error:
+                        raise ValueError("required path escapes repository") from error
             command = [sys.executable if arg == "$PYTHON" else arg for arg in command]
             if command[1:4] == ["-m", "unittest", "discover"]:
                 for flag in ("-s", "-p"):

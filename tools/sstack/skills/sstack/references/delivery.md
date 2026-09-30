@@ -154,8 +154,12 @@ configured host worker command; it does not invent an agent command or credentia
 Uncertain operations remain pending, including after worker failure or timeout.
 Reconcile observed completion, or confirm no action applied and the old worker
 stopped before retrying. Revisions clear old proof; PM eval amendments require a
-reason, reset dispatch and invalidate the old review. Never update the SQLite rows
-directly to bypass a gate.
+reason, reset dispatch and invalidate the old review. If someone merged the
+reviewed PR before `begin`, use `adopt` at `merge_ready`, then `complete` its
+operation; it requires `allow_merge` and a merge at the reviewed head and base
+branch, and records the merge as adopted, not performed. It is not a gate skip:
+validating and reviewing must already have passed, and earlier states are refused.
+Never update the SQLite rows directly to bypass a gate or recover a stuck ticket.
 
 The controller checks local ownership, current source/coverage, report digests,
 registered offline commands, case results and independent review declarations.

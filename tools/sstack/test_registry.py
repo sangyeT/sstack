@@ -163,6 +163,86 @@ class CoverageTests(unittest.TestCase):
                         with self.assertRaisesRegex(ValueError, flag):
                             registry.load_suites(self.root, {})
 
+    def register(self, **fields):
+        path = self.root / registry.REGISTRY_PATH
+        document = json.loads(path.read_text())
+        check = {"name": "app-tests", "cwd": "app", "command": ["$PYTHON", "checks.py"]}
+        document["suites"] = {"app": [{**check, **fields}]}
+        document["projects"][0]["suites"] = ["app"]
+        path.write_text(json.dumps(document))
+
+    def test_custom_run_dir_command_is_valid_and_bound_by_verify(self):
+        script = "import sys; open(sys.argv[1], 'w').write('fresh')"
+        self.register(command=["$PYTHON", "-c", script, control.RUN_DIR + "/app.json"])
+        self.git("add", ".")
+        self.git("commit", "-qm", "register run directory check")
+        base = registry.revision(self.root, "HEAD")
+        self.write("app/main.py", "value = 2\n")
+        report = control.verify("changed", base=base, root=self.root)
+        self.assertEqual(report["status"], "passed")
+        check = report["checks"][0]
+        run_dir = (self.root / report["report"]).parent.resolve()
+        self.assertEqual(check["command"][-1], str(run_dir / "app.json"))
+        self.assertEqual((run_dir / "app.json").read_text(), "fresh")
+        registered = control.suites_for(self.root)["app"][0][2]
+        self.assertEqual(
+            check["command"], control.bind_run_dir(registered, self.root, check["log"])
+        )
+
+    def test_min_python_and_requires_are_optional_readiness_contracts(self):
+        self.write("app/checks.py", "print('verified')\n")
+        current = "{}.{}".format(*control.sys.version_info[:2])
+        self.register(min_python=current, requires=["checks.py", "."])
+        self.assertEqual(
+            registry.load_suites(self.root, {})["app"],
+            [("app-tests", "app", [control.sys.executable, "checks.py"])],
+        )
+        self.assertEqual(control.doctor(self.root, "app")["status"], "passed")
+        self.register(min_python="99.0", requires=["checks.py", "fixtures/", "data/seed.json"])
+        (result,) = control.readiness(self.root, "app")["app"]
+        self.assertEqual(
+            result["reasons"],
+            [
+                "python_99_0_required",
+                "required_path_missing:fixtures/",
+                "required_path_missing:data/seed.json",
+            ],
+        )
+        self.assertEqual(control.doctor(self.root, "app")["status"], "blocked")
+        report = control.verify("app", root=self.root)
+        self.assertEqual((report["status"], report["checks"][0]["status"]), ("blocked", "blocked"))
+        self.write("app/fixtures/case.json", "{}")
+        self.write("app/data/seed.json", "{}")
+        with patch.object(control.sys, "version_info", (99, 0, 0, "final", 0)):
+            self.assertEqual(control.doctor(self.root, "app")["status"], "passed")
+
+    def test_invalid_min_python_and_requires_fail_closed(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        (self.root / "app/outside").symlink_to(outside.name, target_is_directory=True)
+        for fields in (
+            *({"min_python": value} for value in (3.12, "3", "3.12.1", "v3.12", "", None, [3])),
+            *(
+                {"requires": value}
+                for value in (
+                    [],
+                    "checks.py",
+                    None,
+                    [""],
+                    [1],
+                    ["/etc/hosts"],
+                    ["../app/main.py"],
+                    ["tests/../../main.py"],
+                    ["nul\0byte"],
+                    ["outside/secret"],
+                )
+            ),
+        ):
+            with self.subTest(fields=fields):
+                self.register(**fields)
+                with self.assertRaisesRegex(ValueError, "min_python|require"):
+                    registry.load_suites(self.root, {})
+
     def test_excluded_unowned_changes_still_block(self):
         path = self.root / registry.REGISTRY_PATH
         document = json.loads(path.read_text())
@@ -187,6 +267,12 @@ class CoverageTests(unittest.TestCase):
 
     def test_default_registry_keeps_lightweight_selection_exact(self):
         document = json.loads((Path(__file__).parent / "projects.json").read_text())
+        if document["suites"] or {item["id"] for item in document["projects"]} != {
+            "stack",
+            "repository",
+            "documentation",
+        }:
+            self.skipTest("installed registry is customized; verify checks its coverage")
         self.write(registry.REGISTRY_PATH, json.dumps(document))
         # Supply the docs builtin explicitly so this test exercises registry policy.
         suites = {"stack": [], "docs": []}
