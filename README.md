@@ -134,6 +134,24 @@ handoff, recovery and merge rules.
 
 ## Install into a repository
 
+SStack is installed into each repository you want Claude to work in, not uploaded
+as a standalone skill in the Claude app. Its skills call scripts and read
+configuration from that repository (`tools/sstack/`, `projects.json`, `.sstack.json`)
+and act on its Git, GitHub and Jira, so they need the repository's files.
+
+Setup, once per repository:
+
+1. Run the installer below and commit the installed files.
+2. Install the development dependencies with the same interpreter you will use for
+   checks: `pip install -r tools/sstack/requirements-dev.txt`, then
+   `python -m playwright install chromium` where Chromium is not preinstalled.
+   For cloud sessions, put both commands in the environment's setup script.
+3. [Set the PM board](#set-or-change-the-pm-board) with `control.py board set`.
+4. [Register the project](#register-projects-and-verification) and its checks in
+   `tools/sstack/projects.json`; unknown changed paths block verification.
+5. Connect the host's Jira and GitHub access, such as the Atlassian and GitHub
+   connectors in Claude, before asking the PM to post tickets or open PRs.
+
 Requires Git, Python 3.9+ and a filesystem that supports symlinks. Clone SStack:
 
 ```sh
@@ -158,6 +176,17 @@ Open **that repository** in Claude Code or Codex and start a fresh session:
 /sstack Build a portfolio tracker in projects/portfolio.
 Start with manual holdings entry and show allocation by asset class.
 ```
+
+For a stakeholder preview rather than delivery, use the demo lane:
+
+```text
+/sstack-demo Show allocation by asset class for projects/portfolio to the finance team.
+```
+
+It writes a short script, builds on a `demo/*` branch, checks each step with
+`ui_eval.py record` (local app) or `run` (hosted app) plus a visual review, and
+either promotes the approved demo into tickets or archives it. See
+[scripted UI evaluation](tools/sstack/skills/sstack-verify/references/ui-eval.md).
 
 In Codex, use `$sstack` or say `PM: <goal and project folder>`. Claude Code uses
 `/sstack`. If discovery is unavailable, ask the agent to read
