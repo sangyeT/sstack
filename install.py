@@ -12,7 +12,7 @@ CONFIG_SPEC = importlib.util.spec_from_file_location(
 config = importlib.util.module_from_spec(CONFIG_SPEC)
 CONFIG_SPEC.loader.exec_module(config)
 
-SKILLS = ("sstack", "sstack-engineer", "sstack-mode", "sstack-verify")
+SKILLS = ("sstack", "sstack-demo", "sstack-engineer", "sstack-mode", "sstack-verify")
 START = "<!-- sstack:begin -->"
 END = "<!-- sstack:end -->"
 IGNORE_BLOCK = """# sstack generated files
@@ -25,8 +25,9 @@ IGNORE_BLOCK = """# sstack generated files
 """
 BLOCK = f"""{START}
 Use /sstack for PM goals. Read tools/sstack/skills/sstack/SKILL.md and resolve
-project scope and the configured PM board before dispatch. Supporting skills:
-sstack-engineer, sstack-mode, sstack-verify. Canonical skills: tools/sstack/skills/.
+project scope and the configured PM board before dispatch. Use /sstack-demo for
+demos. Supporting skills: sstack-engineer, sstack-mode, sstack-verify.
+Canonical skills: tools/sstack/skills/.
 Configure a board with python tools/sstack/control.py board set URL --project-key KEY.
 Run python tools/sstack/control.py board show before starting a new goal.
 {END}

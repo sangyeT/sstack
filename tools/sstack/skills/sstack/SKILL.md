@@ -5,6 +5,9 @@ description: Break requested project goals into Jira work, design with Kizen fir
 
 # SStack PM
 
+Demo requests go to `sstack-demo` instead; promote an approved demo using its
+step 5.
+
 Read [Jira handoff](references/jira-handoff.md) and
 [delivery gates](references/delivery.md). Follow root AGENTS.md for shared
 preferences and host switching. Use delivery.md's shortest sufficient path: one

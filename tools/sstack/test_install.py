@@ -35,7 +35,7 @@ class InstallTests(unittest.TestCase):
 
     def test_install_preserves_instructions_and_rerun_is_noop(self):
         result = self.install(board_url="https://boards.test/projects/PM", project_key="PM")
-        self.assertEqual(len(result["links"]), 8)
+        self.assertEqual(len(result["links"]), 2 * len(installer.SKILLS))
         self.assertTrue((self.target / ".claude/skills/sstack/SKILL.md").is_file())
         self.assertTrue((self.target / "AGENTS.md").read_text().startswith("# User instructions\n"))
         self.assertFalse((self.target / "tools/sstack/untracked-secret.txt").exists())

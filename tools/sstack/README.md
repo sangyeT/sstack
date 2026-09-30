@@ -64,6 +64,14 @@ time-dependent or shared-state checks. See the
 [delivery rules](skills/sstack/references/delivery.md#choose-the-shortest-sufficient-path)
 for required risk escalation and independent review.
 
+## UI evaluation
+
+`ui_eval.py run` drives a JSON UI script in Chromium against one approved origin,
+saving per-step screenshots, errors and captured values; `ui_eval.py review` binds
+an agent's visual verdicts to those screenshots. See
+[scripted UI evaluation](skills/sstack-verify/references/ui-eval.md). Playwright
+is a development dependency; CI installs Chromium and requires the browser tests.
+
 ## Project coverage and evidence
 
 `projects.json` registers owned paths, offline suites, external acceptance recipes

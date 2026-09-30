@@ -12,7 +12,7 @@ from urllib.parse import unquote
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
-SKILLS = ("sstack", "sstack-engineer", "sstack-mode", "sstack-verify")
+SKILLS = ("sstack", "sstack-demo", "sstack-engineer", "sstack-mode", "sstack-verify")
 STACK = Path("tools/sstack")
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 # Inline destinations, including angle brackets, an optional title and one

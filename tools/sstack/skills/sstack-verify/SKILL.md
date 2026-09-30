@@ -37,7 +37,8 @@ around existing suites does not establish their completeness.
 Reproduce the actual user input/action. Assert observable values/writes/no-writes
 for pure logic. For platform work inspect current state, exact execution and child
 runs, and the corresponding persisted business result. For UI work drive the
-documented user path with available browser tools and inspect rendered output.
+documented user path with [scripted UI evaluation](references/ui-eval.md) or
+available browser tools, and view every rendered step, not only its assertions.
 Capture the trigger and outcome, not just a final screen. Use synthetic records.
 
 Separate local, live Kizen, UI, and untested paths. A build is not live proof;
