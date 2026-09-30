@@ -267,6 +267,12 @@ class CoverageTests(unittest.TestCase):
 
     def test_default_registry_keeps_lightweight_selection_exact(self):
         document = json.loads((Path(__file__).parent / "projects.json").read_text())
+        if document["suites"] or {item["id"] for item in document["projects"]} != {
+            "stack",
+            "repository",
+            "documentation",
+        }:
+            self.skipTest("installed registry is customized; verify checks its coverage")
         self.write(registry.REGISTRY_PATH, json.dumps(document))
         # Supply the docs builtin explicitly so this test exercises registry policy.
         suites = {"stack": [], "docs": []}

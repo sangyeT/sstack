@@ -161,6 +161,9 @@ second report tree. Packets by current state:
   match. Required failed/duplicate checks cannot hide behind passing checks.
   `coverage` can reference the same verification report containing embedded
   coverage; no second coverage file is needed. The gate recomputes and compares it.
+  Check logs must be singly linked regular files directly in
+  `artifacts/sstack/<run_id>/`, and neither `artifacts` nor `artifacts/sstack` may
+  be a link.
 - `reviewing`: `review` reference with `artifact`, current `plan_digest`, independent
   `reviewer`, `decision: "approved"`, and `blocking_findings: []`. Live GitHub state
   must show the expected head/base, clean merge state and successful named checks.
