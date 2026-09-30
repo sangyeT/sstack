@@ -21,6 +21,7 @@ from pathlib import Path
 import registry
 
 ROOT = Path(__file__).resolve().parents[2]
+RUN_DIR = "{run_dir}"  # verify() substitutes this run's artifacts/sstack/<run_id> directory
 DOCS_CHECK = ("docs", ".", [sys.executable, "tools/sstack/check_contracts.py", "--include-readme"])
 BUILTIN_SUITES = {
     "stack": [
@@ -205,6 +206,14 @@ def check_readiness(name, cwd, command, *, root):
         reasons.append("working_directory_missing")
     if not executable_path(command[0], directory):
         reasons.append("executable_missing")
+    options = registered_checks(root).get(name, {})
+    if "min_python" in options:
+        required = tuple(int(part) for part in options["min_python"].split("."))
+        if sys.version_info[:2] < required:
+            reasons.append("python_{}_{}_required".format(*required))
+    for path in options.get("requires", []):
+        if not (directory / path).exists():
+            reasons.append("required_path_missing:" + path)
     if name in {"stack", "stack-lint", "docs"}:
         for module in ("ruff", "yaml"):
             if importlib.util.find_spec(module) is None:
@@ -285,6 +294,17 @@ def doctor(root, suite="all"):
     }
 
 
+def bind_run_dir(command, root, log):
+    """Bind RUN_DIR in a suite command to the resolved run directory holding the check's log.
+
+    verify() and the delivery gate both call this, so the gate recomputes the exact
+    command a report records from the checkout and that check's own log, even when
+    one of them reaches the checkout or run directory through a symlink.
+    """
+    run_dir = (Path(root) / Path(log).parent).resolve()
+    return [part.replace(RUN_DIR, str(run_dir)) for part in command]
+
+
 def run_check(name, cwd, command, *, root, timeout):
     started = time.monotonic()
     result = {"name": name, "cwd": cwd, "command": command}
@@ -335,17 +355,19 @@ def run_check(name, cwd, command, *, root, timeout):
     }, stdout + "\n--- stderr ---\n" + stderr
 
 
+def registered_checks(root):
+    path = root / registry.REGISTRY_PATH
+    if not path.exists():
+        return {}
+    document = json.loads(path.read_text())
+    return {
+        check["name"]: check for checks in document.get("suites", {}).values() for check in checks
+    }
+
+
 def approved_checks(root, flag):
     names = {"stack", "stack-lint", "docs"}
-    path = root / registry.REGISTRY_PATH
-    if path.exists():
-        document = json.loads(path.read_text())
-        names.update(
-            check["name"]
-            for checks in document.get("suites", {}).values()
-            for check in checks
-            if check.get(flag) is True
-        )
+    names.update(name for name, check in registered_checks(root).items() if check.get(flag) is True)
     return names
 
 
@@ -511,7 +533,9 @@ def verify(
         if not reuse_path.is_absolute():
             reuse_path = root / reuse_path
         reusable = approved_checks(root, "reuse_safe")
-        if not bindings["git_revision"] or any(check[0] not in reusable for check in checks):
+        if any(RUN_DIR in arg for _, _, command in checks for arg in command):
+            cached, reason = None, "run_directory_outputs_not_reusable"
+        elif not bindings["git_revision"] or any(check[0] not in reusable for check in checks):
             cached, reason = None, "checks_not_reuse_safe_or_head_missing"
         else:
             cached, reason = reused_report(
@@ -556,7 +580,11 @@ def verify(
         "reuse": reuse_result,
         "checks": [],
     }
-    for result, log in execute_checks(checks, root=root, timeout=timeout, jobs=jobs):
+    bound_checks = [
+        (name, cwd, bind_run_dir(command, root, str((output / (name + ".log")).relative_to(root))))
+        for name, cwd, command in checks
+    ]
+    for result, log in execute_checks(bound_checks, root=root, timeout=timeout, jobs=jobs):
         log_path = output / (result["name"] + ".log")
         log_path.write_text(log)
         result["log"] = str(log_path.relative_to(root))

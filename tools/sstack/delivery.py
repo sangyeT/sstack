@@ -9,6 +9,7 @@ import platform
 import re
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -104,6 +105,43 @@ def github(contract, pr):
     value = json.loads(result.stdout)
     require(isinstance(value, dict), "github_response_invalid")
     return value
+
+
+def verification_log(checkout, log):
+    """Resolve a check's log, which verify() writes as artifacts/sstack/<run_id>/<file>.
+
+    The resolved log must be a singly linked file in its resolved run directory, directly
+    under <resolved checkout>/artifacts/sstack, so the hashed file is in the directory
+    that {run_dir} binds. Git status and the fingerprint both ignore artifacts/, so a link
+    at artifacts/ or artifacts/sstack/ would move the root that logs are confined to.
+    Such links are refused, including for a verify() run written through them.
+    """
+    relative = Path(log)
+    require(
+        not relative.is_absolute()
+        and len(relative.parts) == 4
+        and relative.parts[:2] == ("artifacts", "sstack")
+        and ".." not in relative.parts,
+        "verification_log_invalid",
+    )
+    try:
+        root = Path(checkout).resolve()
+        runs = root / "artifacts" / "sstack"
+        linked = runs.resolve() != runs
+        run_dir = (root / relative.parent).resolve()
+        path = (root / relative).resolve()
+        info = path.stat()
+    except (OSError, RuntimeError, ValueError):  # a symlink loop before 3.13, or a NUL byte
+        raise Blocked("verification_log_invalid") from None
+    require(
+        not linked
+        and run_dir.parent == runs
+        and path.parent == run_dir
+        and stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1,
+        "verification_log_invalid",
+    )
+    return path
 
 
 def check_remote(contract, artifact, *, merged=False, reader=github):
@@ -230,13 +268,15 @@ def gate(task, packet, *, reader=github):
                 if name in required:
                     _, cwd, command = required[name]
                     require(check.get("status") == "passed", "required_check_not_passed:" + name)
+                    require(text(check.get("log")), "verification_log_missing")
+                    log = verification_log(contract["checkout"], check["log"])
+                    # The run directory comes from this check's own log, as in verify().
+                    command = control.bind_run_dir(command, contract["checkout"], check["log"])
                     require(
                         check.get("cwd") == cwd and check.get("command") == command,
                         "verification_command_mismatch:" + name,
                     )
                     require(check.get("exit_code") == 0, "verification_exit_code_invalid")
-                    require(text(check.get("log")), "verification_log_missing")
-                    log = Path(contract["checkout"]) / check["log"]
                     require(
                         hashlib.sha256(log.read_bytes()).hexdigest() == check.get("log_sha256"),
                         "verification_log_changed",
@@ -479,6 +519,35 @@ class Store:
             self.event(db, issue, "operation_started", operation)
         return operation
 
+    def adopt(self, issue, owner, epoch, *, reader=github):
+        """Start the merge_ready operation for a PR someone else merged at the reviewed head.
+
+        This replaces the worker's merge, not a gate: merge_ready is reached only through the
+        validating and reviewing gates, and complete still rereads the merge and stores its SHA.
+        The checkout is not rechecked; GitHub's merged head is what binds the reviewed artifact.
+        """
+        with self.transaction() as db:
+            task = self.owned(db, issue, owner, epoch)
+            require(not task["pending"], "uncertain_operation_reconcile_first")
+            require(not task["error"], "blocked_repair_first")
+            require(task["state"] == "merge_ready", "adoption_requires_merge_ready")
+            require(task["contract"]["allow_merge"], "merge_not_authorized")
+            remote = check_remote(
+                task["contract"], task["context"]["artifact"], merged=True, reader=reader
+            )
+            operation = {
+                "id": str(uuid.uuid4()),
+                "from": "merge_ready",
+                "to": "merged",
+                "epoch": epoch,
+                "adopted": True,
+            }
+            db.execute("UPDATE tasks SET pending=? WHERE issue=?", (canonical(operation), issue))
+            self.event(
+                db, issue, "merge_adopted", {**operation, "merge_sha": remote["mergeCommit"]["oid"]}
+            )
+        return operation
+
     def complete(self, issue, owner, epoch, operation_id, packet, *, reader=github):
         with self.transaction() as db:
             task = self.owned(db, issue, owner, epoch)
@@ -649,6 +718,7 @@ def main(argv=None):
         "claim",
         "renew",
         "begin",
+        "adopt",
         "complete",
         "reconcile",
         "revise",
@@ -681,8 +751,8 @@ def main(argv=None):
             result = store.claim(args.issue, args.owner, args.ttl)
         elif args.command == "renew":
             result = store.renew(args.issue, args.owner, args.epoch, args.ttl)
-        elif args.command == "begin":
-            result = store.begin(args.issue, args.owner, args.epoch)
+        elif args.command in {"begin", "adopt"}:
+            result = getattr(store, args.command)(args.issue, args.owner, args.epoch)
         elif args.command == "run":
             require(worker and all(map(text, worker)), "worker_command_missing")
             if args.epoch is None:

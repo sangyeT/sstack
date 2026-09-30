@@ -50,9 +50,14 @@ For routine delivery, use `control.py verify changed --base <actual-base> --jobs
 instead of a full regression. `verify stack` includes lint and tests. Exact README
 paths use the built-in `docs` suite; skills/runtime changes remain full stack.
 Custom suites accept optional `parallel_safe` and `reuse_safe` booleans, both false
-by default. Parallel execution is bounded (1–8 workers, default 2); serial checks
-act as barriers and never overlap other checks. Per-check `duration_seconds` and
-report `elapsed_seconds` expose cost without another reporting artifact.
+by default. `min_python` (`"MAJOR.MINOR"`) and `requires` (nonempty paths relative
+to the check's `cwd`, inside the repository) are readiness prerequisites: `doctor`
+reports them and `verify` blocks the check with `python_3_12_required` or
+`required_path_missing:<path>`. A command argument may contain `{run_dir}`, bound
+to that run's `artifacts/sstack/<run_id>` directory; such checks are never reused.
+Parallel execution is bounded (1–8 workers, default 2); serial checks act as
+barriers and never overlap other checks. Per-check `duration_seconds` and report
+`elapsed_seconds` expose cost without another reporting artifact.
 
 Explicit reuse uses `--reuse <report.json> --environment-key <immutable-runtime-id>`;
 the original run must supply the same environment key. Reuse verifies the full
@@ -161,6 +166,8 @@ second report tree. Packets by current state:
   must show the expected head/base, clean merge state and successful named checks.
 - `merge_ready`: remote GitHub must actually report MERGED for the expected head;
   the controller reads and stores its merge SHA. A queued merge is not completion.
+  If someone merged the reviewed PR before `begin`, `adopt` (owner and epoch) starts
+  the operation instead; it requires `allow_merge` and a merge at the reviewed head.
 - `merged`: `merge_sha`, `environment`, and a `rollout` reference whose independently
   observed envelope contains the same `merge_sha`/`environment`, `deployment_ref`,
   nonempty `execution_refs`, and postmerge eval `result`. If rollout was explicitly

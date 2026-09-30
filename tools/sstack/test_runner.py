@@ -75,6 +75,36 @@ class RunnerTests(unittest.TestCase):
             {"stack", "stack-lint", "docs", "reusable"},
         )
 
+    def test_run_directory_output_is_rebound_and_never_reused(self):
+        self.checks[:] = [
+            (
+                "sample",
+                ".",
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; from pathlib import Path; Path(sys.argv[1]).write_text('fresh')",
+                    control.RUN_DIR + "/result.json",
+                ],
+            )
+        ]
+        report = self.cached()
+        original = Path(report["checks"][0]["command"][-1])
+        self.assertEqual(original.read_text(), "fresh")
+        original.unlink()
+        result = self.reuse(report)
+        self.assertEqual(result["reuse"]["status"], "miss")
+        self.assertEqual(result["reuse"]["reason"], "run_directory_outputs_not_reusable")
+        self.assertEqual(result["status"], "passed")
+        output = Path(result["checks"][0]["command"][-1])
+        self.assertNotEqual(original, output)
+        self.assertEqual(output.parent, (self.root / result["report"]).parent.resolve())
+        self.assertEqual(output.read_text(), "fresh")
+        self.assertEqual(
+            result["checks"][0]["command"],
+            control.bind_run_dir(self.checks[0][2], self.root, result["checks"][0]["log"]),
+        )
+
     def test_all_runs_shared_docs_check_once(self):
         with patch.object(control, "SUITES", control.BUILTIN_SUITES):
             result = control.verify("all", plan=True, root=self.root)
