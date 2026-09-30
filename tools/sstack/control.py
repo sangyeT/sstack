@@ -445,7 +445,15 @@ def execute_checks(checks, *, root, timeout, jobs):
 
 
 def verify(
-    suite, *, timeout=180, plan=False, root=None, base=None, jobs=2, reuse=None, environment_key=None
+    suite,
+    *,
+    timeout=180,
+    plan=False,
+    root=None,
+    base=None,
+    jobs=2,
+    reuse=None,
+    environment_key=None,
 ):
     started = time.monotonic()
     if not isinstance(jobs, int) or isinstance(jobs, bool) or not 1 <= jobs <= 8:
