@@ -67,6 +67,31 @@ python tools/sstack/ui_eval.py review artifacts/sstack/ui/<run>/report.json VERD
   screenshots changed since the run. Verdicts are the reviewer's declarations; the
   tool binds them to the screenshot hashes but cannot authenticate them.
 
+## Start and record a local app
+
+For an app the repository runs locally, `record` replaces starting the server by
+hand. It refuses to start if something already answers at `base_url`, so it never
+records a stale server. It starts the launch command, waits until the ready path
+answers below 500, runs the script with video, and then stops only the process
+group it started.
+
+```sh
+python tools/sstack/ui_eval.py record SCRIPT.json --launch demos/<name>/launch.json
+```
+
+```json
+{"command": ["npm", "run", "dev", "--", "--port", "5173"], "cwd": "projects/portfolio",
+ "ready_path": "/", "ready_timeout_s": 60, "env": {"DEMO_SEED": "synthetic"}}
+```
+
+`command` is an argument list run without a shell, with `$PYTHON` replaced by the
+current interpreter. `cwd` must be inside the repository, and `base_url` must be on
+localhost. The report adds `server` (command, pid, readiness time, exit code and
+`server.log`) and `videos` with their hashes. Readiness failures fail the run before
+any browser step. A local app can still call remote services, so the approved-write
+rules apply to whatever it talks to; the server log may contain its output and must
+be inspected before sharing.
+
 `report.json` `eval_cases` already has the result-case shape (`id`, `observed`,
 `evidence`) for `surface: "ui"` cases in the
 [evaluation contract](../../sstack/references/jira-handoff.md#pm-owned-evaluation-sets).

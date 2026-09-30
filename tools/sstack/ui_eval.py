@@ -6,11 +6,17 @@ from __future__ import annotations
 import argparse
 import datetime
 import hashlib
+import http.client
 import json
+import os
 import re
 import secrets
+import signal
+import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
@@ -33,6 +39,8 @@ MARKER = "{run_marker}"
 NUMBER = re.compile(r"(?<![\w.,-])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![.,]?\d|-?\w)")
 QUERY = re.compile(r"[?#][^\s\"'<>]*")
 VERDICTS = {"pass", "fail"}
+LAUNCH_REQUIRED = {"command", "cwd"}
+LAUNCH_OPTIONAL = {"ready_path", "ready_timeout_s", "env"}
 PROBLEMS = ("console_errors", "page_errors", "failed_requests", "blocked_navigations")
 
 
@@ -326,6 +334,10 @@ def run(
         browser_version = browser.version
         context.close()
         browser.close()
+    videos = [
+        {"file": path.relative_to(out).as_posix(), "sha256": digest(path)}
+        for path in sorted((out / "video").glob("*.webm"))
+    ]
     passed = all(step["status"] == "passed" for step in steps) and not any(problems.values())
     report = {
         "schema_version": 1,
@@ -342,12 +354,142 @@ def run(
         "steps": steps,
         **problems,
         "popups": popups,
+        "videos": videos,
         "eval_cases": [
             {"id": case, "observed": values, "evidence": evidence[case]}
             for case, values in observed.items()
         ],
         "scope": "automated UI checks only; screenshots need visual review",
     }
+    (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+    return report
+
+
+def validate_launch(launch, root=ROOT):
+    if not isinstance(launch, dict) or not LAUNCH_REQUIRED <= set(launch):
+        raise ValueError("launch: command and cwd required")
+    if set(launch) - LAUNCH_REQUIRED - LAUNCH_OPTIONAL:
+        raise ValueError("launch: unknown fields")
+    command = launch["command"]
+    if not isinstance(command, list) or not command:
+        raise ValueError("launch: command must be a nonempty argument list, not a shell string")
+    for part in command:
+        _text(part, "launch.command")
+    cwd = (Path(root) / launch["cwd"]).resolve() if isinstance(launch["cwd"], str) else None
+    if cwd is None or not (cwd == Path(root).resolve() or Path(root).resolve() in cwd.parents):
+        raise ValueError("launch: cwd must be a directory inside the repository")
+    if not cwd.is_dir():
+        raise ValueError("launch: cwd is not a directory")
+    ready = launch.get("ready_path", "/")
+    if not isinstance(ready, str) or not ready.startswith("/") or ready.startswith("//"):
+        raise ValueError("launch: ready_path must start with a single /")
+    timeout = launch.get("ready_timeout_s", 60)
+    if type(timeout) not in (int, float) or not 0 < timeout <= 600:
+        raise ValueError("launch: ready_timeout_s must be between 0 and 600 seconds")
+    env = launch.get("env", {})
+    if not isinstance(env, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in env.items()
+    ):
+        raise ValueError("launch: env must map names to strings")
+    return {
+        "command": [sys.executable if part == "$PYTHON" else part for part in command],
+        "cwd": cwd,
+        "ready_path": ready,
+        "ready_timeout_s": timeout,
+        "env": env,
+    }
+
+
+def responds(url):
+    """Whether a local server answers below 500; bypasses proxies meant for remote hosts."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(url, timeout=1) as response:
+            return response.status < 500
+    except urllib.error.HTTPError as error:
+        return error.code < 500
+    except (urllib.error.URLError, http.client.HTTPException, OSError):
+        return False
+
+
+def stop(process):
+    if process.poll() is None:
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                if hasattr(os, "killpg"):
+                    os.killpg(process.pid, sig)
+                else:
+                    process.kill()
+                process.wait(timeout=10)
+                break
+            except ProcessLookupError:
+                break
+            except subprocess.TimeoutExpired:
+                continue
+    return process.wait()
+
+
+def record(script, launch, *, out_dir, storage_state=None, headed=False, timeout_ms=15000):
+    """Start a local app, wait until it answers, run the script with video, then stop it."""
+    validate_script(script)
+    settings = validate_launch(launch)
+    if urlsplit(script["base_url"]).hostname not in LOCAL_HOSTS:
+        raise ValueError("record launches a local app; base_url must be on localhost")
+    ready_url = urljoin(script["base_url"], settings["ready_path"])
+    if responds(ready_url):
+        raise ValueError("base_url already answers; stop that server or use another port")
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    server = {
+        "command": settings["command"],
+        "cwd": str(settings["cwd"]),
+        "env_keys": sorted(settings["env"]),
+        "log": "server.log",
+    }
+    reasons, report = [], None
+    started = time.monotonic()
+    with open(out / "server.log", "wb") as log:
+        process = subprocess.Popen(
+            settings["command"],
+            cwd=settings["cwd"],
+            env={**os.environ, **settings["env"]},
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        server["pid"] = process.pid
+        try:
+            deadline = started + settings["ready_timeout_s"]
+            while not responds(ready_url):
+                if process.poll() is not None:
+                    reasons.append("server_exited_before_ready")
+                    break
+                if time.monotonic() > deadline:
+                    reasons.append("server_not_ready")
+                    break
+                time.sleep(0.25)
+            else:
+                server["ready_seconds"] = round(time.monotonic() - started, 3)
+                report = run(
+                    script,
+                    approved_origin=script["base_url"],
+                    out_dir=out,
+                    storage_state=storage_state,
+                    headed=headed,
+                    video=True,
+                    timeout_ms=timeout_ms,
+                )
+                if process.poll() is not None:
+                    reasons.append("server_exited_during_run")
+        finally:
+            server["exit_code"] = stop(process)
+    if report is None:
+        report = {"schema_version": 1, "status": "failed", "base_url": script["base_url"]}
+    if reasons:
+        report["status"] = "failed"
+    report["reasons"] = reasons
+    report["server"] = server
     (out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     return report
 
@@ -427,14 +569,36 @@ def main(argv=None):
     runner.add_argument("--headed", action="store_true")
     runner.add_argument("--video", action="store_true")
     runner.add_argument("--timeout-ms", type=int, default=15000)
+    recorder = commands.add_parser(
+        "record", help="Start a local app, run a UI script with video, then stop the app"
+    )
+    recorder.add_argument("script")
+    recorder.add_argument("--launch", required=True)
+    recorder.add_argument("--storage-state")
+    recorder.add_argument("--out")
+    recorder.add_argument("--headed", action="store_true")
+    recorder.add_argument("--timeout-ms", type=int, default=15000)
     reviewer = commands.add_parser("review", help="Record visual verdicts for a run")
     reviewer.add_argument("report")
     reviewer.add_argument("verdicts")
     args = parser.parse_args(argv)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out = (
+        getattr(args, "out", None)
+        or ROOT / "artifacts/sstack/ui" / f"{stamp}-{secrets.token_hex(4)}"
+    )
     try:
-        if args.command == "run":
-            stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-            out = args.out or ROOT / "artifacts/sstack/ui" / f"{stamp}-{secrets.token_hex(4)}"
+        if args.command == "record":
+            result = record(
+                json.loads(Path(args.script).read_text()),
+                json.loads(Path(args.launch).read_text()),
+                out_dir=out,
+                storage_state=args.storage_state,
+                headed=args.headed,
+                timeout_ms=args.timeout_ms,
+            )
+            result = {**result, "report": str(Path(out) / "report.json")}
+        elif args.command == "run":
             result = run(
                 json.loads(Path(args.script).read_text()),
                 approved_origin=args.approved_origin,

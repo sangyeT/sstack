@@ -1,5 +1,6 @@
 import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
@@ -141,18 +142,127 @@ class ValidationTests(unittest.TestCase):
                     ui_eval.review(report, verdicts)
 
 
+def require_browser():
+    try:
+        from playwright.sync_api import Error, sync_playwright
+
+        with sync_playwright() as playwright:
+            playwright.chromium.launch().close()
+    except (ImportError, Error) as error:
+        if os.environ.get("SSTACK_REQUIRE_BROWSER"):
+            raise
+        raise unittest.SkipTest(f"Chromium unavailable: {type(error).__name__}") from error
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class LaunchValidationTests(unittest.TestCase):
+    def test_rejects_unsafe_or_malformed_launch_files(self):
+        good = {"command": ["$PYTHON", "-m", "http.server"], "cwd": "tools/sstack"}
+        self.assertEqual(ui_eval.validate_launch(good)["command"][0], ui_eval.sys.executable)
+        for launch in (
+            {**good, "command": "python -m http.server"},
+            {**good, "command": []},
+            {**good, "cwd": "../.."},
+            {**good, "cwd": "missing-dir"},
+            {**good, "ready_path": "//evil.test"},
+            {**good, "ready_timeout_s": 0},
+            {**good, "env": {"A": 1}},
+            {**good, "shell": True},
+            {"command": ["x"]},
+        ):
+            with self.subTest(launch=launch), self.assertRaises(ValueError):
+                ui_eval.validate_launch(launch)
+
+    def test_record_requires_a_local_base_url(self):
+        launch = {"command": ["$PYTHON", "-m", "http.server"], "cwd": "tools/sstack"}
+        with tempfile.TemporaryDirectory() as out, self.assertRaises(ValueError):
+            ui_eval.record(script("https://sandbox.example.test"), launch, out_dir=out)
+
+
+class RecordTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        require_browser()
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.out = Path(temp.name, "out")
+        self.site = Path(temp.name, "site")
+        self.site.mkdir()
+        (self.site / "index.html").write_text(
+            PAGES["/"].replace("{port}", "1") + '<a id="about" href="/about.html">About</a>'
+        )
+        (self.site / "about.html").write_text("<h1 id='title'>About the demo</h1>")
+        self.port = free_port()
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def launch(self, *command, **extra):
+        command = command or (
+            "$PYTHON", "-m", "http.server", str(self.port),
+            "--bind", "127.0.0.1", "--directory", str(self.site),
+        )  # fmt: skip
+        return {"command": list(command), "cwd": "tools/sstack", "ready_timeout_s": 15, **extra}
+
+    def test_starts_app_records_video_and_stops_only_its_server(self):
+        report = ui_eval.record(
+            script(
+                self.base,
+                {"action": "click", "selector": "#about"},
+                {"action": "expect_text", "selector": "#title", "text": "About the demo"},
+            ),
+            self.launch(),
+            out_dir=self.out,
+        )
+        self.assertEqual(report["status"], "passed", report)
+        self.assertEqual(report["reasons"], [])
+        self.assertTrue(report["videos"], report)
+        for video in report["videos"]:
+            self.assertEqual(ui_eval.digest(self.out / video["file"]), video["sha256"])
+        self.assertIn("ready_seconds", report["server"])
+        self.assertIsNotNone(report["server"]["exit_code"])
+        self.assertTrue((self.out / "server.log").is_file())
+        self.assertFalse(ui_eval.responds(self.base + "/"))
+        saved = json.loads((self.out / "report.json").read_text())
+        self.assertEqual(saved["server"]["pid"], report["server"]["pid"])
+
+    def test_server_that_exits_or_never_answers_fails_without_a_browser_run(self):
+        for command, reason in (
+            (("$PYTHON", "-c", "import sys; sys.exit(3)"), "server_exited_before_ready"),
+            (("$PYTHON", "-c", "import time; time.sleep(60)"), "server_not_ready"),
+        ):
+            with self.subTest(reason=reason):
+                started = ui_eval.time.monotonic()
+                report = ui_eval.record(
+                    script(self.base),
+                    self.launch(*command, ready_timeout_s=1),
+                    out_dir=self.out,
+                )
+                self.assertEqual((report["status"], report["reasons"]), ("failed", [reason]))
+                self.assertNotIn("steps", report)
+                self.assertIsNotNone(report["server"]["exit_code"])
+                self.assertLess(ui_eval.time.monotonic() - started, 15)
+
+    def test_refuses_to_record_against_a_server_it_did_not_start(self):
+        stale = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        stale.hosts = []
+        threading.Thread(target=stale.serve_forever, daemon=True).start()
+        self.addCleanup(stale.server_close)
+        self.addCleanup(stale.shutdown)
+        with self.assertRaises(ValueError):
+            ui_eval.record(script(self.base), self.launch(), out_dir=self.out)
+        self.assertEqual(stale.hosts, ["127.0.0.1"])
+
+
 class BrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        try:
-            from playwright.sync_api import Error, sync_playwright
-
-            with sync_playwright() as playwright:
-                playwright.chromium.launch().close()
-        except (ImportError, Error) as error:
-            if os.environ.get("SSTACK_REQUIRE_BROWSER"):
-                raise
-            raise unittest.SkipTest(f"Chromium unavailable: {type(error).__name__}") from error
+        require_browser()
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         cls.server.hosts = []
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
