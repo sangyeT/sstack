@@ -481,16 +481,41 @@ class _Terminated(Exception):
     pass
 
 
-def _terminate(signum, frame):
-    raise _Terminated(signum)
+class _Signals:
+    """Turn SIGTERM/SIGHUP into _Terminated, deferring them while the server starts or stops."""
+
+    def __init__(self):
+        self.defer, self.pending, self.previous = True, None, {}
+        names = ("SIGTERM", "SIGHUP")
+        self.handled = [getattr(signal, name) for name in names if hasattr(signal, name)]
+
+    def __enter__(self):
+        if threading.current_thread() is threading.main_thread():
+            self.previous = {sig: signal.signal(sig, self.handle) for sig in self.handled}
+        return self
+
+    def handle(self, signum, frame):
+        if self.defer:
+            self.pending = signum
+        else:
+            raise _Terminated(signum)
+
+    def allow(self):
+        self.defer = False
+        if self.pending:
+            raise _Terminated(self.pending)
+
+    def __exit__(self, *exc):
+        for sig, handler in self.previous.items():
+            signal.signal(sig, handler)
+        if self.pending and exc[0] is None:
+            raise _Terminated(self.pending)
 
 
 def record(
     script, launch, *, out_dir, storage_state=None, headed=False, timeout_ms=15000, root=ROOT
 ):
     """Start a local app, wait until it answers, run the script with video, then stop it."""
-    from playwright.sync_api import Error as PlaywrightError
-
     validate_script(script)
     settings = validate_launch(launch, root)
     if urlsplit(script["base_url"]).hostname not in LOCAL_HOSTS:
@@ -507,12 +532,8 @@ def record(
         "log": "server.log",
     }
     reasons, report = [], None
-    handled = (signal.SIGTERM, signal.SIGHUP) if hasattr(signal, "SIGHUP") else (signal.SIGTERM,)
-    previous = {}
-    if threading.current_thread() is threading.main_thread():
-        previous = {sig: signal.signal(sig, _terminate) for sig in handled}
     started = time.monotonic()
-    try:
+    with _Signals() as signals:
         with open(out / "server.log", "wb") as log:
             process = subprocess.Popen(
                 settings["command"],
@@ -525,6 +546,7 @@ def record(
             )
             server["pid"] = process.pid
             try:
+                signals.allow()
                 deadline = started + settings["ready_timeout_s"]
                 while not responds(ready_url):
                     if process.poll() is not None:
@@ -539,6 +561,8 @@ def record(
                     if process.poll() is not None:
                         reasons.append("server_exited_before_ready")
                     else:
+                        from playwright.sync_api import Error as PlaywrightError
+
                         try:
                             report = run(
                                 script,
@@ -555,10 +579,8 @@ def record(
                         if process.poll() is not None:
                             reasons.append("server_exited_during_run")
             finally:
+                signals.defer = True
                 server["exit_code"] = stop(process, settings["stop_grace_s"])
-    finally:
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
     if report is None:
         report = {
             "schema_version": 1,

@@ -148,10 +148,14 @@ class ValidationTests(unittest.TestCase):
 def require_browser():
     try:
         from playwright.sync_api import Error, sync_playwright
-
+    except ImportError as error:
+        if os.environ.get("SSTACK_REQUIRE_BROWSER"):
+            raise
+        raise unittest.SkipTest("playwright not installed") from error
+    try:
         with sync_playwright() as playwright:
             playwright.chromium.launch().close()
-    except (ImportError, Error) as error:
+    except Error as error:
         if os.environ.get("SSTACK_REQUIRE_BROWSER"):
             raise
         raise unittest.SkipTest(f"Chromium unavailable: {type(error).__name__}") from error
@@ -339,6 +343,38 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(report["server"]["env_keys"], ["DEMO_TOKEN"])
         self.assertEqual(report["server"]["cwd"], "tools/sstack")
         self.assertNotIn("s3cret-value", (self.out / "report.json").read_text())
+
+    def test_sigterm_during_stop_grace_still_kills_the_group(self):
+        pidfile = self.site.parent / "child.pid"
+        source = (
+            "import signal, subprocess, sys, time\n"
+            "c = subprocess.Popen([sys.executable, '-c', 'import signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+            "time.sleep(120)"
+        )
+        driver = (
+            "import json, sys, ui_eval\n"
+            "ui_eval.record(json.loads(sys.argv[1]), json.loads(sys.argv[2]), out_dir=sys.argv[3])"
+        )
+        launch = self.python(source, ready_timeout_s=1, stop_grace_s=4)
+        parent = subprocess.Popen(
+            [sys.executable, "-c", driver, json.dumps(script(self.base)), json.dumps(launch),
+             str(self.out)],
+            cwd=Path(ui_eval.__file__).parent,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )  # fmt: skip
+        self.addCleanup(parent.kill)
+        deadline = ui_eval.time.monotonic() + 10
+        while not pidfile.exists() and ui_eval.time.monotonic() < deadline:
+            ui_eval.time.sleep(0.1)
+        child = int(pidfile.read_text())
+        ui_eval.time.sleep(2.5)  # readiness has timed out; stop() is inside its grace wait
+        parent.send_signal(signal.SIGTERM)
+        parent.wait(timeout=30)
+        self.assertNotEqual(parent.returncode, 0)
+        self.assertFalse(alive(child), f"child {child} survived SIGTERM during stop")
 
     def test_sigterm_to_record_still_stops_the_server(self):
         driver = (
