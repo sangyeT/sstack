@@ -67,6 +67,38 @@ python tools/sstack/ui_eval.py review artifacts/sstack/ui/<run>/report.json VERD
   screenshots changed since the run. Verdicts are the reviewer's declarations; the
   tool binds them to the screenshot hashes but cannot authenticate them.
 
+## Start and record a local app
+
+For an app the repository runs locally, `record` replaces starting the server by
+hand. It refuses to start while anything already listens on the `base_url` port. It
+then starts the launch command, waits until the ready path answers below 400
+(redirects are not followed), runs the script with video, and stops the whole
+process group it started: SIGTERM, then SIGKILL after `stop_grace_s` for anything
+still running, including children that outlive the command. If `record` itself
+receives SIGTERM or SIGHUP, it still stops the server.
+
+```sh
+python tools/sstack/ui_eval.py record SCRIPT.json --launch demos/<name>/launch.json
+```
+
+```json
+{"command": ["npm", "run", "dev", "--", "--port", "5173", "--strictPort"],
+ "cwd": "projects/portfolio",
+ "ready_path": "/", "ready_timeout_s": 60, "stop_grace_s": 10, "env": {"DEMO_SEED": "synthetic"}}
+```
+
+`command` is an argument list run without a shell, with `$PYTHON` replaced by the
+current interpreter. Use a fixed port so the app cannot silently move to another one
+(for Vite, `--strictPort`). `cwd` must be inside the repository, and `base_url` must
+be on localhost. The report adds `server` (the command as given, `cwd` relative to
+the repository, pid, readiness time, exit code, env names without values, and
+`server.log`) and `videos` from this run with their hashes. Readiness,
+browser-launch and server-exit failures fail the run. A readiness failure has no
+steps, and `review` reports it as failed. Keep tokens out of command arguments,
+since the command is recorded. A local app can still call remote services, so the
+approved-write rules apply to whatever it talks to. The server log may contain the
+app's output; inspect it before sharing.
+
 `report.json` `eval_cases` already has the result-case shape (`id`, `observed`,
 `evidence`) for `surface: "ui"` cases in the
 [evaluation contract](../../sstack/references/jira-handoff.md#pm-owned-evaluation-sets).

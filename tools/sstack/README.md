@@ -67,8 +67,9 @@ for required risk escalation and independent review.
 ## UI evaluation
 
 `ui_eval.py run` drives a JSON UI script in Chromium against one approved origin,
-saving per-step screenshots, errors and captured values; `ui_eval.py review` binds
-an agent's visual verdicts to those screenshots. See
+saving per-step screenshots, errors and captured values. `ui_eval.py record` also
+starts a local app from a launch file, records video and stops it. `ui_eval.py review`
+binds an agent's visual verdicts to those screenshots. See
 [scripted UI evaluation](skills/sstack-verify/references/ui-eval.md). Playwright
 is a development dependency; CI installs Chromium and requires the browser tests.
 

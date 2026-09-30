@@ -1,5 +1,9 @@
 import json
 import os
+import signal
+import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -141,18 +145,265 @@ class ValidationTests(unittest.TestCase):
                     ui_eval.review(report, verdicts)
 
 
+def require_browser():
+    try:
+        from playwright.sync_api import Error, sync_playwright
+    except ImportError as error:
+        if os.environ.get("SSTACK_REQUIRE_BROWSER"):
+            raise
+        raise unittest.SkipTest("playwright not installed") from error
+    try:
+        with sync_playwright() as playwright:
+            playwright.chromium.launch().close()
+    except Error as error:
+        if os.environ.get("SSTACK_REQUIRE_BROWSER"):
+            raise
+        raise unittest.SkipTest(f"Chromium unavailable: {type(error).__name__}") from error
+
+
+def alive(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def serve(port, site, *, before="", requests=None, status=None):
+    """Python source for a launched test server; optional setup, request limit or status."""
+    handler = "http.server.SimpleHTTPRequestHandler"
+    if status:
+        handler = "Always"
+    loop = f"[s.handle_request() for _ in range({requests})]" if requests else "s.serve_forever()"
+    return f"""import functools, http.server, os, signal, subprocess, sys, time
+class Always(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response({status or 200}); self.end_headers()
+{before}
+s = http.server.ThreadingHTTPServer(
+    ("127.0.0.1", {port}), functools.partial({handler}, directory={str(site)!r})
+    if {handler!r} != "Always" else Always)
+{loop}
+"""
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class LaunchValidationTests(unittest.TestCase):
+    def test_rejects_unsafe_or_malformed_launch_files(self):
+        good = {"command": ["$PYTHON", "-m", "http.server"], "cwd": "tools/sstack"}
+        self.assertEqual(ui_eval.validate_launch(good)["command"][0], ui_eval.sys.executable)
+        for launch in (
+            {**good, "command": "python -m http.server"},
+            {**good, "command": []},
+            {**good, "cwd": "../.."},
+            {**good, "cwd": "missing-dir"},
+            {**good, "ready_path": "//evil.test"},
+            {**good, "ready_timeout_s": 0},
+            {**good, "stop_grace_s": 120},
+            {**good, "env": {"A": 1}},
+            {**good, "shell": True},
+            {"command": ["x"]},
+        ):
+            with self.subTest(launch=launch), self.assertRaises(ValueError):
+                ui_eval.validate_launch(launch)
+
+    def test_record_requires_a_local_base_url(self):
+        launch = {"command": ["$PYTHON", "-m", "http.server"], "cwd": "tools/sstack"}
+        with tempfile.TemporaryDirectory() as out, self.assertRaises(ValueError):
+            ui_eval.record(script("https://sandbox.example.test"), launch, out_dir=out)
+
+
+class RecordTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        require_browser()
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.out = Path(temp.name, "out")
+        self.site = Path(temp.name, "site")
+        self.site.mkdir()
+        (self.site / "index.html").write_text(
+            PAGES["/"].replace("{port}", "1") + '<a id="about" href="/about.html">About</a>'
+        )
+        (self.site / "about.html").write_text("<h1 id='title'>About the demo</h1>")
+        self.port = free_port()
+        self.base = f"http://127.0.0.1:{self.port}"
+
+    def launch(self, *command, **extra):
+        command = command or (
+            "$PYTHON", "-m", "http.server", str(self.port),
+            "--bind", "127.0.0.1", "--directory", str(self.site),
+        )  # fmt: skip
+        return {"command": list(command), "cwd": "tools/sstack", "ready_timeout_s": 15, **extra}
+
+    def test_starts_app_records_video_and_stops_only_its_server(self):
+        report = ui_eval.record(
+            script(
+                self.base,
+                {"action": "click", "selector": "#about"},
+                {"action": "expect_text", "selector": "#title", "text": "About the demo"},
+            ),
+            self.launch(),
+            out_dir=self.out,
+        )
+        self.assertEqual(report["status"], "passed", report)
+        self.assertEqual(report["reasons"], [])
+        self.assertTrue(report["videos"], report)
+        for video in report["videos"]:
+            self.assertEqual(ui_eval.digest(self.out / video["file"]), video["sha256"])
+        self.assertIn("ready_seconds", report["server"])
+        self.assertIsNotNone(report["server"]["exit_code"])
+        self.assertTrue((self.out / "server.log").is_file())
+        self.assertFalse(ui_eval.responds(self.base + "/"))
+        saved = json.loads((self.out / "report.json").read_text())
+        self.assertEqual(saved["server"]["pid"], report["server"]["pid"])
+
+    def test_server_that_exits_or_never_answers_fails_without_a_browser_run(self):
+        for command, reason in (
+            (("$PYTHON", "-c", "import sys; sys.exit(3)"), "server_exited_before_ready"),
+            (("$PYTHON", "-c", "import time; time.sleep(60)"), "server_not_ready"),
+        ):
+            with self.subTest(reason=reason):
+                started = ui_eval.time.monotonic()
+                report = ui_eval.record(
+                    script(self.base),
+                    self.launch(*command, ready_timeout_s=1),
+                    out_dir=self.out,
+                )
+                self.assertEqual((report["status"], report["reasons"]), ("failed", [reason]))
+                self.assertEqual((report["steps"], report["videos"]), ([], []))
+                reviewed = ui_eval.review(self.out / "report.json", {"reviewer": "r", "steps": {}})
+                self.assertEqual(reviewed["status"], "failed")
+                self.assertIn(reason, reviewed["reasons"])
+                self.assertIsNotNone(report["server"]["exit_code"])
+                self.assertLess(ui_eval.time.monotonic() - started, 15)
+
+    def test_refuses_to_record_against_a_server_it_did_not_start(self):
+        stale = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        stale.hosts = []
+        threading.Thread(target=stale.serve_forever, daemon=True).start()
+        self.addCleanup(stale.server_close)
+        self.addCleanup(stale.shutdown)
+        with self.assertRaises(ValueError):
+            ui_eval.record(script(self.base), self.launch(), out_dir=self.out)
+        self.assertFalse((self.out / "server.log").exists())
+
+    def python(self, source, **extra):
+        return self.launch("$PYTHON", "-c", source, **extra)
+
+    def test_stops_children_that_ignore_sigterm_or_outlive_the_leader(self):
+        pidfile = self.site.parent / "child.pid"
+        spawn = (
+            "c = subprocess.Popen([sys.executable, '-c', 'import signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(str(c.pid))"
+        )
+        for exits_first in (False, True):
+            with self.subTest(leader_exits_first=exits_first):
+                source = serve(self.port, self.site, before=spawn)
+                if exits_first:
+                    source = source.replace("s.serve_forever()", "sys.exit(0)")
+                report = ui_eval.record(
+                    script(self.base),
+                    self.python(source, ready_timeout_s=5, stop_grace_s=1),
+                    out_dir=self.out,
+                )
+                child = int(pidfile.read_text())
+                self.assertFalse(alive(child), f"child {child} survived")
+                expected = ["server_exited_before_ready"] if exits_first else []
+                self.assertEqual(report["reasons"], expected, report)
+
+    def test_server_exiting_during_run_and_error_status_fail(self):
+        report = ui_eval.record(
+            script(self.base, {"action": "wait_for", "selector": "#go"}),
+            self.python(serve(self.port, self.site, requests=2)),
+            out_dir=self.out,
+        )
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("server_exited_during_run", report["reasons"])
+        busy = ui_eval.record(
+            script(self.base),
+            self.python(serve(self.port, self.site, status=503), ready_timeout_s=1),
+            out_dir=self.out,
+        )
+        self.assertEqual(busy["reasons"], ["server_not_ready"])
+
+    def test_report_omits_env_values_and_lists_only_this_runs_videos(self):
+        launch = self.launch(env={"DEMO_TOKEN": "s3cret-value"})
+        for _ in range(2):
+            report = ui_eval.record(script(self.base), launch, out_dir=self.out)
+        self.assertEqual(report["status"], "passed", report)
+        self.assertEqual(len(report["videos"]), 1)
+        self.assertEqual(report["server"]["env_keys"], ["DEMO_TOKEN"])
+        self.assertEqual(report["server"]["cwd"], "tools/sstack")
+        self.assertNotIn("s3cret-value", (self.out / "report.json").read_text())
+
+    def test_sigterm_during_stop_grace_still_kills_the_group(self):
+        pidfile = self.site.parent / "child.pid"
+        source = (
+            "import signal, subprocess, sys, time\n"
+            "c = subprocess.Popen([sys.executable, '-c', 'import signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+            "time.sleep(120)"
+        )
+        driver = (
+            "import json, sys, ui_eval\n"
+            "ui_eval.record(json.loads(sys.argv[1]), json.loads(sys.argv[2]), out_dir=sys.argv[3])"
+        )
+        launch = self.python(source, ready_timeout_s=1, stop_grace_s=4)
+        parent = subprocess.Popen(
+            [sys.executable, "-c", driver, json.dumps(script(self.base)), json.dumps(launch),
+             str(self.out)],
+            cwd=Path(ui_eval.__file__).parent,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )  # fmt: skip
+        self.addCleanup(parent.kill)
+        deadline = ui_eval.time.monotonic() + 10
+        while not pidfile.exists() and ui_eval.time.monotonic() < deadline:
+            ui_eval.time.sleep(0.1)
+        child = int(pidfile.read_text())
+        ui_eval.time.sleep(2.5)  # readiness has timed out; stop() is inside its grace wait
+        parent.send_signal(signal.SIGTERM)
+        parent.wait(timeout=30)
+        self.assertNotEqual(parent.returncode, 0)
+        self.assertFalse(alive(child), f"child {child} survived SIGTERM during stop")
+
+    def test_sigterm_to_record_still_stops_the_server(self):
+        driver = (
+            "import json, sys, ui_eval\n"
+            "ui_eval.record(json.loads(sys.argv[1]), json.loads(sys.argv[2]), out_dir=sys.argv[3])"
+        )
+        slow = script(self.base, {"action": "wait_for", "selector": "#never", "timeout_ms": 60000})
+        parent = subprocess.Popen(
+            [sys.executable, "-c", driver, json.dumps(slow), json.dumps(self.launch()),
+             str(self.out)],
+            cwd=Path(ui_eval.__file__).parent,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )  # fmt: skip
+        self.addCleanup(parent.kill)
+        deadline = ui_eval.time.monotonic() + 20
+        while not ui_eval.listening(self.base) and ui_eval.time.monotonic() < deadline:
+            ui_eval.time.sleep(0.1)
+        self.assertTrue(ui_eval.listening(self.base), "server never started")
+        ui_eval.time.sleep(1)
+        parent.send_signal(signal.SIGTERM)
+        parent.wait(timeout=30)
+        self.assertFalse(ui_eval.listening(self.base), "server survived SIGTERM to record")
+
+
 class BrowserTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        try:
-            from playwright.sync_api import Error, sync_playwright
-
-            with sync_playwright() as playwright:
-                playwright.chromium.launch().close()
-        except (ImportError, Error) as error:
-            if os.environ.get("SSTACK_REQUIRE_BROWSER"):
-                raise
-            raise unittest.SkipTest(f"Chromium unavailable: {type(error).__name__}") from error
+        require_browser()
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         cls.server.hosts = []
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()

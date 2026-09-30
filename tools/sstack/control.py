@@ -445,7 +445,15 @@ def execute_checks(checks, *, root, timeout, jobs):
 
 
 def verify(
-    suite, *, timeout=60, plan=False, root=None, base=None, jobs=2, reuse=None, environment_key=None
+    suite,
+    *,
+    timeout=180,
+    plan=False,
+    root=None,
+    base=None,
+    jobs=2,
+    reuse=None,
+    environment_key=None,
 ):
     started = time.monotonic()
     if not isinstance(jobs, int) or isinstance(jobs, bool) or not 1 <= jobs <= 8:
@@ -626,7 +634,7 @@ def main():
     runner.add_argument("--base")
     coverage_parser = commands.add_parser("coverage")
     coverage_parser.add_argument("--base", required=True)
-    runner.add_argument("--timeout", type=positive, default=60)
+    runner.add_argument("--timeout", type=positive, default=180)
     runner.add_argument("--plan", action="store_true")
     runner.add_argument("--jobs", type=bounded_jobs, default=2)
     runner.add_argument("--reuse", metavar="REPORT")

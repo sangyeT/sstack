@@ -44,9 +44,11 @@ Script changes from stakeholder feedback are expected, not violations.
 Reuse existing app code, templates and seed data before writing new ones. Start from
 a clean app state with a fresh run marker; leave earlier sandbox records in place
 rather than deleting them. Encode the script as a
-[UI script](../sstack-verify/references/ui-eval.md) and run `ui_eval.py run`
-against the approved origin; add `--video` for a recording. It checks each step,
-saves a screenshot per step, and fails on console errors or failed requests.
+[UI script](../sstack-verify/references/ui-eval.md). For a local app, use
+`ui_eval.py record` with `demos/<name>/launch.json` to start it, record video and
+stop it; otherwise use `ui_eval.py run --video` against the approved origin. Both
+check each step, save a screenshot per step, and fail on console errors or failed
+requests.
 
 Then do the visual check: view every screenshot, with computer use or by opening
 the image, against the script's visible result and record verdicts with
@@ -62,10 +64,10 @@ the image, against the script's visible result and record verdicts with
 
 ## 4. Rehearse
 
-Run `ui_eval.py run` twice more with fresh markers within the time budget. Both runs
-must pass automated checks and visual review. For a customer-facing demo, optionally
-ask a fresh agent to review only the recording and script: does it tell the story,
-and what would confuse the audience?
+Run `ui_eval.py record` or `run` twice more with fresh markers within the time
+budget. Both runs must pass automated checks and visual review. For a
+customer-facing demo, optionally ask a fresh agent to review only the recording and
+script: does it tell the story, and what would confuse the audience?
 
 Report the branch, URL or launch command, recording or screenshots, rehearsal
 results and the faked list. Stakeholder feedback returns to step 1.
