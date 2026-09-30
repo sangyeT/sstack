@@ -12,8 +12,10 @@ import os
 import re
 import secrets
 import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -40,7 +42,7 @@ NUMBER = re.compile(r"(?<![\w.,-])-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![.,]?
 QUERY = re.compile(r"[?#][^\s\"'<>]*")
 VERDICTS = {"pass", "fail"}
 LAUNCH_REQUIRED = {"command", "cwd"}
-LAUNCH_OPTIONAL = {"ready_path", "ready_timeout_s", "env"}
+LAUNCH_OPTIONAL = {"ready_path", "ready_timeout_s", "stop_grace_s", "env"}
 PROBLEMS = ("console_errors", "page_errors", "failed_requests", "blocked_navigations")
 
 
@@ -253,7 +255,7 @@ def run(
         if storage_state:
             options["storage_state"] = str(storage_state)
         if video:
-            options["record_video_dir"] = str(out / "video")
+            options["record_video_dir"] = str(out / "video" / marker)
         context = browser.new_context(**options)
         context.route("**/*", guard)
         context.on("console", console)
@@ -336,7 +338,7 @@ def run(
         browser.close()
     videos = [
         {"file": path.relative_to(out).as_posix(), "sha256": digest(path)}
-        for path in sorted((out / "video").glob("*.webm"))
+        for path in sorted((out / "video" / marker).glob("*.webm"))
     ]
     passed = all(step["status"] == "passed" for step in steps) and not any(problems.values())
     report = {
@@ -373,8 +375,8 @@ def validate_launch(launch, root=ROOT):
     command = launch["command"]
     if not isinstance(command, list) or not command:
         raise ValueError("launch: command must be a nonempty argument list, not a shell string")
-    for part in command:
-        _text(part, "launch.command")
+    if not all(isinstance(part, str) and part for part in command):
+        raise ValueError("launch: command arguments must be nonempty strings")
     cwd = (Path(root) / launch["cwd"]).resolve() if isinstance(launch["cwd"], str) else None
     if cwd is None or not (cwd == Path(root).resolve() or Path(root).resolve() in cwd.parents):
         raise ValueError("launch: cwd must be a directory inside the repository")
@@ -386,6 +388,9 @@ def validate_launch(launch, root=ROOT):
     timeout = launch.get("ready_timeout_s", 60)
     if type(timeout) not in (int, float) or not 0 < timeout <= 600:
         raise ValueError("launch: ready_timeout_s must be between 0 and 600 seconds")
+    grace = launch.get("stop_grace_s", 10)
+    if type(grace) not in (int, float) or not 0 < grace <= 60:
+        raise ValueError("launch: stop_grace_s must be between 0 and 60 seconds")
     env = launch.get("env", {})
     if not isinstance(env, dict) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in env.items()
@@ -396,96 +401,172 @@ def validate_launch(launch, root=ROOT):
         "cwd": cwd,
         "ready_path": ready,
         "ready_timeout_s": timeout,
+        "stop_grace_s": grace,
         "env": env,
     }
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 def responds(url):
-    """Whether a local server answers below 500; bypasses proxies meant for remote hosts."""
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    """Whether a local server answers below 400; never follows redirects or uses proxies."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
     try:
         with opener.open(url, timeout=1) as response:
-            return response.status < 500
+            return response.status < 400
     except urllib.error.HTTPError as error:
-        return error.code < 500
+        return error.code < 400
     except (urllib.error.URLError, http.client.HTTPException, OSError):
         return False
 
 
-def stop(process):
-    if process.poll() is None:
-        for sig in (signal.SIGTERM, signal.SIGKILL):
+def listening(url):
+    parts = urlsplit(url)
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    try:
+        with socket.create_connection((parts.hostname, port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def group_alive(pgid):
+    """Whether any non-zombie process remains in the group; zombies wait on their reaper."""
+    proc = Path("/proc")
+    if proc.is_dir():
+        for stat in proc.glob("[0-9]*/stat"):
             try:
-                if hasattr(os, "killpg"):
-                    os.killpg(process.pid, sig)
-                else:
-                    process.kill()
-                process.wait(timeout=10)
-                break
-            except ProcessLookupError:
-                break
-            except subprocess.TimeoutExpired:
+                fields = stat.read_text().rsplit(")", 1)[1].split()
+            except (OSError, IndexError):
                 continue
-    return process.wait()
+            if fields[0] != "Z" and int(fields[2]) == pgid:
+                return True
+        return False
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
-def record(script, launch, *, out_dir, storage_state=None, headed=False, timeout_ms=15000):
+def stop(process, grace=10):
+    """Stop the whole process group, including children that outlive or ignore the leader."""
+    if not hasattr(os, "killpg"):
+        process.kill()
+        return process.wait(timeout=grace)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            break
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            process.poll()
+            if not group_alive(process.pid):
+                break
+            time.sleep(0.1)
+        else:
+            continue
+        break
+    try:
+        return process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+class _Terminated(Exception):
+    pass
+
+
+def _terminate(signum, frame):
+    raise _Terminated(signum)
+
+
+def record(
+    script, launch, *, out_dir, storage_state=None, headed=False, timeout_ms=15000, root=ROOT
+):
     """Start a local app, wait until it answers, run the script with video, then stop it."""
+    from playwright.sync_api import Error as PlaywrightError
+
     validate_script(script)
-    settings = validate_launch(launch)
+    settings = validate_launch(launch, root)
     if urlsplit(script["base_url"]).hostname not in LOCAL_HOSTS:
         raise ValueError("record launches a local app; base_url must be on localhost")
     ready_url = urljoin(script["base_url"], settings["ready_path"])
-    if responds(ready_url):
-        raise ValueError("base_url already answers; stop that server or use another port")
+    if listening(script["base_url"]):
+        raise ValueError("something already listens at base_url; stop it or use another port")
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     server = {
         "command": settings["command"],
-        "cwd": str(settings["cwd"]),
+        "cwd": settings["cwd"].relative_to(Path(root).resolve()).as_posix() or ".",
         "env_keys": sorted(settings["env"]),
         "log": "server.log",
     }
     reasons, report = [], None
+    handled = (signal.SIGTERM, signal.SIGHUP) if hasattr(signal, "SIGHUP") else (signal.SIGTERM,)
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {sig: signal.signal(sig, _terminate) for sig in handled}
     started = time.monotonic()
-    with open(out / "server.log", "wb") as log:
-        process = subprocess.Popen(
-            settings["command"],
-            cwd=settings["cwd"],
-            env={**os.environ, **settings["env"]},
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        server["pid"] = process.pid
-        try:
-            deadline = started + settings["ready_timeout_s"]
-            while not responds(ready_url):
-                if process.poll() is not None:
-                    reasons.append("server_exited_before_ready")
-                    break
-                if time.monotonic() > deadline:
-                    reasons.append("server_not_ready")
-                    break
-                time.sleep(0.25)
-            else:
-                server["ready_seconds"] = round(time.monotonic() - started, 3)
-                report = run(
-                    script,
-                    approved_origin=script["base_url"],
-                    out_dir=out,
-                    storage_state=storage_state,
-                    headed=headed,
-                    video=True,
-                    timeout_ms=timeout_ms,
-                )
-                if process.poll() is not None:
-                    reasons.append("server_exited_during_run")
-        finally:
-            server["exit_code"] = stop(process)
+    try:
+        with open(out / "server.log", "wb") as log:
+            process = subprocess.Popen(
+                settings["command"],
+                cwd=settings["cwd"],
+                env={**os.environ, **settings["env"]},
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+            server["pid"] = process.pid
+            try:
+                deadline = started + settings["ready_timeout_s"]
+                while not responds(ready_url):
+                    if process.poll() is not None:
+                        reasons.append("server_exited_before_ready")
+                        break
+                    if time.monotonic() > deadline:
+                        reasons.append("server_not_ready")
+                        break
+                    time.sleep(0.25)
+                else:
+                    server["ready_seconds"] = round(time.monotonic() - started, 3)
+                    if process.poll() is not None:
+                        reasons.append("server_exited_before_ready")
+                    else:
+                        try:
+                            report = run(
+                                script,
+                                approved_origin=script["base_url"],
+                                out_dir=out,
+                                storage_state=storage_state,
+                                headed=headed,
+                                video=True,
+                                timeout_ms=timeout_ms,
+                                root=root,
+                            )
+                        except PlaywrightError as error:
+                            reasons.append("browser_failed: " + redact(str(error).splitlines()[0]))
+                        if process.poll() is not None:
+                            reasons.append("server_exited_during_run")
+            finally:
+                server["exit_code"] = stop(process, settings["stop_grace_s"])
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
     if report is None:
-        report = {"schema_version": 1, "status": "failed", "base_url": script["base_url"]}
+        report = {
+            "schema_version": 1,
+            "status": "failed",
+            "base_url": script["base_url"],
+            "steps": [],
+            "videos": [],
+        }
     if reasons:
         report["status"] = "failed"
     report["reasons"] = reasons
@@ -512,6 +593,13 @@ def review(report_path, verdicts):
     """Bind an agent's per-screenshot visual verdicts to the recorded evidence."""
     report_path = Path(report_path)
     report = json.loads(report_path.read_text())
+    if isinstance(report, dict) and report.get("status") == "failed" and report.get("steps") == []:
+        return {
+            "schema_version": 1,
+            "status": "failed",
+            "reasons": ["automated_checks_failed", *report.get("reasons", [])],
+            "steps": {},
+        }
     shots = _report_steps(report)
     if not isinstance(verdicts, dict) or set(verdicts) != {"reviewer", "steps"}:
         raise ValueError("verdicts: reviewer and steps required")
@@ -611,6 +699,8 @@ def main(argv=None):
             result = {**result, "report": str(Path(out) / "report.json")}
         else:
             result = review(args.report, json.loads(Path(args.verdicts).read_text()))
+    except _Terminated as signum:
+        result = {"status": "blocked", "reasons": [f"terminated by signal {signum}"]}
     except ImportError:
         result = {"status": "blocked", "reasons": ["install playwright from requirements-dev"]}
     except (OSError, ValueError) as error:

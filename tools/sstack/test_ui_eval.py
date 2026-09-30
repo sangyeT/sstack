@@ -1,6 +1,9 @@
 import json
 import os
+import signal
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -154,6 +157,31 @@ def require_browser():
         raise unittest.SkipTest(f"Chromium unavailable: {type(error).__name__}") from error
 
 
+def alive(pid):
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def serve(port, site, *, before="", requests=None, status=None):
+    """Python source for a launched test server; optional setup, request limit or status."""
+    handler = "http.server.SimpleHTTPRequestHandler"
+    if status:
+        handler = "Always"
+    loop = f"[s.handle_request() for _ in range({requests})]" if requests else "s.serve_forever()"
+    return f"""import functools, http.server, os, signal, subprocess, sys, time
+class Always(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response({status or 200}); self.end_headers()
+{before}
+s = http.server.ThreadingHTTPServer(
+    ("127.0.0.1", {port}), functools.partial({handler}, directory={str(site)!r})
+    if {handler!r} != "Always" else Always)
+{loop}
+"""
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -171,6 +199,7 @@ class LaunchValidationTests(unittest.TestCase):
             {**good, "cwd": "missing-dir"},
             {**good, "ready_path": "//evil.test"},
             {**good, "ready_timeout_s": 0},
+            {**good, "stop_grace_s": 120},
             {**good, "env": {"A": 1}},
             {**good, "shell": True},
             {"command": ["x"]},
@@ -244,7 +273,10 @@ class RecordTests(unittest.TestCase):
                     out_dir=self.out,
                 )
                 self.assertEqual((report["status"], report["reasons"]), ("failed", [reason]))
-                self.assertNotIn("steps", report)
+                self.assertEqual((report["steps"], report["videos"]), ([], []))
+                reviewed = ui_eval.review(self.out / "report.json", {"reviewer": "r", "steps": {}})
+                self.assertEqual(reviewed["status"], "failed")
+                self.assertIn(reason, reviewed["reasons"])
                 self.assertIsNotNone(report["server"]["exit_code"])
                 self.assertLess(ui_eval.time.monotonic() - started, 15)
 
@@ -256,7 +288,80 @@ class RecordTests(unittest.TestCase):
         self.addCleanup(stale.shutdown)
         with self.assertRaises(ValueError):
             ui_eval.record(script(self.base), self.launch(), out_dir=self.out)
-        self.assertEqual(stale.hosts, ["127.0.0.1"])
+        self.assertFalse((self.out / "server.log").exists())
+
+    def python(self, source, **extra):
+        return self.launch("$PYTHON", "-c", source, **extra)
+
+    def test_stops_children_that_ignore_sigterm_or_outlive_the_leader(self):
+        pidfile = self.site.parent / "child.pid"
+        spawn = (
+            "c = subprocess.Popen([sys.executable, '-c', 'import signal, time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)'])\n"
+            f"open({str(pidfile)!r}, 'w').write(str(c.pid))"
+        )
+        for exits_first in (False, True):
+            with self.subTest(leader_exits_first=exits_first):
+                source = serve(self.port, self.site, before=spawn)
+                if exits_first:
+                    source = source.replace("s.serve_forever()", "sys.exit(0)")
+                report = ui_eval.record(
+                    script(self.base),
+                    self.python(source, ready_timeout_s=5, stop_grace_s=1),
+                    out_dir=self.out,
+                )
+                child = int(pidfile.read_text())
+                self.assertFalse(alive(child), f"child {child} survived")
+                expected = ["server_exited_before_ready"] if exits_first else []
+                self.assertEqual(report["reasons"], expected, report)
+
+    def test_server_exiting_during_run_and_error_status_fail(self):
+        report = ui_eval.record(
+            script(self.base, {"action": "wait_for", "selector": "#go"}),
+            self.python(serve(self.port, self.site, requests=2)),
+            out_dir=self.out,
+        )
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("server_exited_during_run", report["reasons"])
+        busy = ui_eval.record(
+            script(self.base),
+            self.python(serve(self.port, self.site, status=503), ready_timeout_s=1),
+            out_dir=self.out,
+        )
+        self.assertEqual(busy["reasons"], ["server_not_ready"])
+
+    def test_report_omits_env_values_and_lists_only_this_runs_videos(self):
+        launch = self.launch(env={"DEMO_TOKEN": "s3cret-value"})
+        for _ in range(2):
+            report = ui_eval.record(script(self.base), launch, out_dir=self.out)
+        self.assertEqual(report["status"], "passed", report)
+        self.assertEqual(len(report["videos"]), 1)
+        self.assertEqual(report["server"]["env_keys"], ["DEMO_TOKEN"])
+        self.assertEqual(report["server"]["cwd"], "tools/sstack")
+        self.assertNotIn("s3cret-value", (self.out / "report.json").read_text())
+
+    def test_sigterm_to_record_still_stops_the_server(self):
+        driver = (
+            "import json, sys, ui_eval\n"
+            "ui_eval.record(json.loads(sys.argv[1]), json.loads(sys.argv[2]), out_dir=sys.argv[3])"
+        )
+        slow = script(self.base, {"action": "wait_for", "selector": "#never", "timeout_ms": 60000})
+        parent = subprocess.Popen(
+            [sys.executable, "-c", driver, json.dumps(slow), json.dumps(self.launch()),
+             str(self.out)],
+            cwd=Path(ui_eval.__file__).parent,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )  # fmt: skip
+        self.addCleanup(parent.kill)
+        deadline = ui_eval.time.monotonic() + 20
+        while not ui_eval.listening(self.base) and ui_eval.time.monotonic() < deadline:
+            ui_eval.time.sleep(0.1)
+        self.assertTrue(ui_eval.listening(self.base), "server never started")
+        ui_eval.time.sleep(1)
+        parent.send_signal(signal.SIGTERM)
+        parent.wait(timeout=30)
+        self.assertFalse(ui_eval.listening(self.base), "server survived SIGTERM to record")
 
 
 class BrowserTests(unittest.TestCase):
