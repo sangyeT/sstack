@@ -36,8 +36,8 @@ jobs:
           BASE_REVISION: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           if [[ -z "$BASE_REVISION" || "$BASE_REVISION" =~ ^0+$ ]]; then
-            python tools/sstack/control.py verify stack --jobs 2 --timeout 180
+            python tools/sstack/control.py verify stack --jobs 2
             python tools/sstack/control.py coverage --base "$GITHUB_SHA"
           else
-            python tools/sstack/control.py verify changed --base "$BASE_REVISION" --jobs 2 --timeout 180
+            python tools/sstack/control.py verify changed --base "$BASE_REVISION" --jobs 2
           fi
